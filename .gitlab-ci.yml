@@ -1,0 +1,23 @@
+image: python:3.12-slim
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages:
+  - test
+
+test:
+  stage: test
+  script:
+    - python -m pip install -r requirements.txt
+    - python -m compileall -q app.py db.py quiz_service.py reports.py tests
+    - python -m pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml

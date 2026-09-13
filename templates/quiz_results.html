@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block title %}Quiz results{% endblock %}
+{% block content %}<div class="page-heading"><div><span class="eyebrow">ASSESSMENT INSIGHTS · {{ quiz.code }}</span><h1>{{ quiz.title }}</h1><p class="muted">{{ quiz.question_count }} questions · {{ quiz.time_limit }} minutes · {{ results|length }} submitted · {{ active }} in progress</p></div><div class="actions"><a class="button secondary" href="{{ url_for('leaderboard', quiz_id=quiz.id) }}">Leaderboard</a><a class="button secondary" href="{{ url_for('download_csv', quiz_id=quiz.id) }}">↓ CSV</a><a class="button secondary" href="{{ url_for('download_xlsx', quiz_id=quiz.id) }}">↓ Excel</a><a class="button" href="{{ url_for('download_pdf', quiz_id=quiz.id) }}">↓ PDF</a></div></div>
+{% if analytics %}<div class="card" style="margin-bottom: 24px;"><h2>Analytics</h2><div class="stats result-stats" style="margin-bottom: 24px;"><div class="stat"><strong>{{ analytics.avg_percent }}%</strong><span>Average</span></div><div class="stat"><strong>{{ analytics.high_score }}</strong><span>Highest</span></div><div class="stat"><strong>{{ analytics.low_score }}</strong><span>Lowest</span></div>{% if quiz.pass_fail_enabled %}<div class="stat correct"><strong>{{ analytics.pass_count }}</strong><span>Passed</span></div><div class="stat"><strong>{{ analytics.fail_count }}</strong><span>Failed</span></div>{% endif %}</div><h3>Question Accuracy</h3><div class="table-scroll" tabindex="0"><table><thead><tr><th scope="col">No.</th><th scope="col">Question</th><th scope="col">Accuracy</th></tr></thead><tbody>{% for q in analytics.q_stats %}<tr><td>{{ q.position + 1 }}</td><td class="clamp">{{ q.text }}</td><td>{% if analytics.total > 0 %}{{ (q.correct * 100 / analytics.total)|round(1) }}%{% else %}0%{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>{% endif %}
+<div class="card" style="margin-bottom: 24px;"><h2>Live Dashboard</h2><p class="muted">Real-time quiz participation data. Updates every 5 seconds.</p><div id="live-stats-container"><div class="stats result-stats" style="margin-bottom:0"><div class="stat"><strong id="ls-total">0</strong><span>Total joined</span></div><div class="stat"><strong id="ls-progress">0</strong><span>In progress</span></div><div class="stat"><strong id="ls-submitted">0</strong><span>Submitted</span></div><div class="stat"><strong id="ls-completion">0%</strong><span>Completion</span></div><div class="stat"><strong id="ls-avg">0%</strong><span>Avg score</span></div></div><div id="live-participants" style="margin-top:16px;"></div></div></div>
+<div class="card"><h2>Student results</h2><p class="muted">Ranked by score, then fastest time. All submission times are UTC.</p>{% include '_results_table.html' %}</div><p><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
+<script>
+var liveUrl = '{{ url_for("live_stats", quiz_id=quiz.id) }}';
+function fetchLiveStats() {
+    fetch(liveUrl, {credentials: 'same-origin'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('ls-total').textContent = data.total;
+            document.getElementById('ls-progress').textContent = data.in_progress;
+            document.getElementById('ls-submitted').textContent = data.submitted;
+            document.getElementById('ls-completion').textContent = data.completion + '%';
+            document.getElementById('ls-avg').textContent = data.avg_score + '%';
+            var container = document.getElementById('live-participants');
+            if (data.active_count === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            var html = '<div class="table-scroll" tabindex="0"><table><thead><tr><th>Student</th><th>Roll Number</th><th>Progress</th></tr></thead><tbody>';
+            data.participants.forEach(function(p) {
+                html += '<tr><td>' + p.name + '</td><td>' + p.roll_number + '</td><td>' + p.answered + ' / ' + p.total_q + ' answered</td></tr>';
+            });
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        })
+        .catch(function() {
+            document.getElementById('ls-total').textContent = '—';
+        });
+}
+setInterval(fetchLiveStats, 5000);
+fetchLiveStats();
+</script>
+{% endblock %}

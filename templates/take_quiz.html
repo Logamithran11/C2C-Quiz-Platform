@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block title %}{{ quiz.title }}{% endblock %}
+{% block scripts %}<script defer src="{{ url_for('static', filename='js/quiz_player.js') }}"></script>{% endblock %}
+{% block content %}
+<noscript><div class="alert">JavaScript is required for answer saving and submission. Your deadline continues running.</div></noscript>
+<div id="quiz-player" data-deadline="{{ attempt.deadline }}" data-server-now="{{ server_now }}" data-save-url="{{ url_for('save_answers', attempt_id=attempt.id) }}" data-submit-url="{{ url_for('submit_quiz', attempt_id=attempt.id) }}" data-result-url="{{ url_for('result', attempt_id=attempt.id) }}">
+<div class="page-heading"><div><span class="eyebrow">{{ quiz.code }} · {{ attempt.name }} · {{ attempt.roll_number }}</span><h1>{{ quiz.title }}</h1></div><div class="timer" role="timer" aria-label="Time remaining"><small>TIME REMAINING</small><strong id="countdown">--:--</strong></div></div>
+<div class="player-layout"><aside class="card question-sidebar"><h2>Your progress</h2><p id="progress-text" aria-live="polite">0 of {{ questions|length }} answered</p><progress id="answer-progress" max="{{ questions|length }}" value="0"></progress><div class="question-nav" aria-label="Question navigation">{% for question in questions %}<button type="button" data-index="{{ loop.index0 }}" class="nav-question" aria-label="Go to question {{ loop.index }}">{{ loop.index }}</button>{% endfor %}</div><p class="muted">Filled buttons indicate answered questions.</p><p id="save-status" role="status">Your answers save as you go.</p></aside>
+<section class="card question-area"><form id="answer-form">{% for question in questions %}<fieldset class="question-panel" data-id="{{ question.id }}" {% if not loop.first %}hidden{% endif %}><legend><span class="eyebrow">QUESTION {{ loop.index }} OF {{ questions|length }}</span><span class="question-title">{{ question.text }}</span></legend><div class="answer-options">{% for index in question.get('option_order', [0, 1, 2, 3]) %}<label class="answer-option"><input type="radio" name="q_{{ question.id }}" value="{{ index }}" {% if saved.get(question.id|string) == index %}checked{% endif %}><span class="option-letter">{{ 'ABCD'[loop.index0] }}</span><span>{{ question['option_' ~ index] }}</span></label>{% endfor %}</div><button class="text-button clear-answer" type="button">Clear answer</button></fieldset>{% endfor %}<div class="spread question-controls"><button class="button secondary" type="button" id="previous-question">← Previous</button><button class="button secondary" type="button" id="next-question">Next →</button></div><hr><div class="spread"><p class="muted">Ready? Submit to see your result.</p><button class="button" type="submit" id="submit-quiz">Submit quiz</button></div></form><p class="error-text" id="player-error" role="alert"></p></section></div></div>
+
+<!-- Submit Confirmation Modal -->
+<div id="submit-modal" class="modal-overlay" hidden>
+  <div class="card modal-card">
+    <h2>Submit Quiz?</h2>
+    <div style="text-align:center;margin-top:12px;">
+      <p class="muted">You have answered <strong id="modal-answered-count">0</strong> out of <strong>{{ questions|length }}</strong> questions.</p>
+      <p class="error-text" id="modal-unanswered-warning" style="display:none;margin-top:8px;">You have <strong id="modal-unanswered-count">0</strong> unanswered question(s).</p>
+      <p style="margin-top:12px;">You cannot change your answers after submission.</p>
+    </div>
+    <div class="spread" style="margin-top:24px;">
+      <button type="button" class="button secondary" id="submit-cancel">Keep Reviewing</button>
+      <button type="button" class="button" id="submit-confirm">Submit Quiz</button>
+    </div>
+  </div>
+</div>
+{% endblock %}

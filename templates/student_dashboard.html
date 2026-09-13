@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}My Quiz History{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">STUDENT PORTAL</span>
+    <h1>My Quiz History</h1>
+    <p class="muted">Your completed attempts and performance.</p>
+  </div>
+  <a class="button secondary" href="{{ url_for('join_quiz') }}">Join a new quiz</a>
+</div>
+
+<h2>Recent Attempts</h2>
+<div class="quiz-grid">
+  {% for attempt in attempts %}
+  <article class="card quiz-card">
+    <div class="spread">
+      <div>
+        <span class="pill">{{ attempt.code }}</span>
+        {% if attempt.pass_fail_enabled %}
+          {% if attempt.percentage >= attempt.pass_percentage %}
+            <span class="pill" style="margin-left:4px;background:var(--success);color:white;border-color:var(--success);">PASS</span>
+          {% else %}
+            <span class="pill" style="margin-left:4px;background:var(--danger);color:white;border-color:var(--danger);">FAIL</span>
+          {% endif %}
+        {% endif %}
+      </div>
+      <span class="muted">{{ attempt.submitted_at|utc }}</span>
+    </div>
+    <h3>{{ attempt.title }}</h3>
+    <div class="quiz-meta">
+      <span>Score: {{ attempt.score }}/{{ attempt.total }} ({{ attempt.percentage }}%)</span>
+      <span>Time taken: {{ attempt.time_taken // 60 }}m {{ attempt.time_taken % 60 }}s</span>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:16px; font-size:0.85rem;" class="muted">
+      <span><span style="color:var(--success);">●</span> {{ attempt.correct }} Correct</span>
+      <span><span style="color:var(--danger);">●</span> {{ attempt.wrong }} Wrong</span>
+      <span><span style="color:var(--muted);">●</span> {{ attempt.unanswered }} Unanswered</span>
+    </div>
+    <div class="actions" style="margin-top:16px;">
+      <a class="button small" href="{{ url_for('result', attempt_id=attempt.id) }}">View detailed result</a>
+    </div>
+  </article>
+  {% else %}
+  <div class="card empty">
+    <span class="feature-icon">📚</span>
+    <h3>No completed quizzes yet.</h3>
+    <p>Join a quiz using a code from your instructor to get started.</p>
+    <a class="button" href="{{ url_for('join_quiz') }}">Join a quiz</a>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

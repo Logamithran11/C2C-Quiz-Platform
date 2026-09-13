@@ -1,0 +1,170 @@
+{% extends 'base.html' %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="page-heading"><div><img class="page-logo" src="{{ url_for('static', filename='images/hct-logo.png') }}" alt="Hindusthan College of Technology" width="180" height="50"><span class="eyebrow">CREATOR WORKSPACE</span><h1>Hello, {{ g.creator.name }}.</h1><p class="muted">A little preparation. A lot of learning.</p></div><a class="button" href="{{ url_for('create_quiz') }}">+ Create quiz</a></div>
+<div class="stats"><div class="stat"><strong>{{ quizzes|length }}</strong><span>Quizzes created</span></div><div class="stat"><strong>{{ quizzes|sum(attribute='participant_count') }}</strong><span>Student attempts</span></div><div class="stat"><strong>{{ quizzes|sum(attribute='question_count') }}</strong><span>Questions created</span></div></div>
+<h2>Your quizzes</h2><div class="quiz-grid">{% for quiz in quizzes %}<article class="card quiz-card"><div class="spread"><div><span class="pill">{{ quiz.code }}</span><span class="pill" style="margin-left: 4px;">{{ quiz.status }}</span></div><span class="muted">{{ quiz.created_at|utc }}</span></div><h3>{{ quiz.title }}</h3><p class="muted clamp">{{ quiz.description or 'Ready for your next classroom challenge.' }}</p><div class="quiz-meta"><span>{{ quiz.question_count }} questions</span><span>{{ quiz.time_limit }} min</span><span>{{ quiz.participant_count }} participants</span></div><label class="share-label">Shareable link<input readonly value="{{ url_for('join_quiz', code=quiz.code, _external=true) }}" aria-label="Share link for {{ quiz.title }}"></label><div class="actions"><button type="button" class="button secondary small" data-copy="{{ url_for('join_quiz', code=quiz.code, _external=true) }}">Copy link</button><button type="button" class="button secondary small" data-qr-id="{{ quiz.id }}" data-qr-url="{{ url_for('download_qr', quiz_id=quiz.id) }}">Get QR</button><a class="button small" href="{{ url_for('quiz_results', quiz_id=quiz.id) }}">View results</a></div><div class="card-links"><a href="{{ url_for('leaderboard', quiz_id=quiz.id) }}">Leaderboard</a><a href="{{ url_for('download_pdf', quiz_id=quiz.id) }}">Download PDF</a>{% if not quiz.participant_count %}<a href="{{ url_for('edit_quiz', quiz_id=quiz.id) }}">Edit</a>{% else %}<span class="muted">Editing locked</span>{% endif %}<form method="post" action="{{ url_for('delete_quiz', quiz_id=quiz.id) }}" class="inline-form delete-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="text-button" style="color:var(--danger);font-size:.8rem;padding:0;text-decoration:underline;text-underline-offset:3px">Delete Quiz</button></form></div></article>{% else %}<div class="card empty"><span class="feature-icon">+</span><h3>Your first quiz is a blank canvas.</h3><p>Add a few questions and share a challenge with your class.</p><a class="button" href="{{ url_for('create_quiz') }}">Create your first quiz</a></div>{% endfor %}</div><p id="copy-status" class="muted" role="status"></p>
+
+<!-- QR Sharing Modal -->
+<div id="qr-modal" class="modal-overlay" hidden>
+  <div class="card modal-card">
+    <h2>Share Quiz</h2>
+    <p class="muted" style="text-align:center;margin-top:10px;">Scan this QR code to join the quiz</p>
+    <div id="qr-modal-body" style="text-align:center;">
+      <p class="muted">Generating QR code…</p>
+    </div>
+    <div class="actions" style="justify-content:center;margin-top:16px;">
+      <button type="button" class="button secondary small" id="qr-copy-link">Copy Link</button>
+      <button type="button" class="button secondary small" id="qr-share-link">Share</button>
+      <a class="button small" id="qr-download-link" href="#" download>Download QR</a>
+    </div>
+    <p id="qr-share-status" class="muted" style="text-align:center;margin-top:8px;font-size:0.85rem;" role="status"></p>
+    <div style="text-align:center;margin-top:8px;"><button type="button" class="text-button" id="qr-close">Close</button></div>
+  </div>
+</div>
+<!-- Delete Confirmation Modal -->
+<div id="delete-modal" class="modal-overlay" hidden>
+  <div class="card modal-card">
+    <h2>Delete Quiz?</h2>
+    <div style="text-align:center;margin-top:12px;">
+      <p class="muted">This will permanently delete the quiz, its questions, student attempts, and results. This action cannot be undone.</p>
+    </div>
+    <div class="spread" style="margin-top:24px;">
+      <button type="button" class="button secondary" id="delete-cancel">Cancel</button>
+      <button type="button" class="button" id="delete-confirm" style="background:var(--danger);border-color:var(--danger);">Delete Quiz</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  /* Copy link buttons */
+  document.querySelectorAll('[data-copy]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      navigator.clipboard.writeText(btn.dataset.copy).then(function() {
+        document.getElementById('copy-status').textContent = 'Link copied!';
+        setTimeout(function() { document.getElementById('copy-status').textContent = ''; }, 2000);
+      });
+    });
+  });
+
+  /* QR Modal */
+  var qrModal = document.getElementById('qr-modal');
+  var qrBody = document.getElementById('qr-modal-body');
+  var copyBtn = document.getElementById('qr-copy-link');
+  var shareBtn = document.getElementById('qr-share-link');
+  var downloadLink = document.getElementById('qr-download-link');
+  var qrCloseBtn = document.getElementById('qr-close');
+  var shareStatus = document.getElementById('qr-share-status');
+  var currentUrl = '';
+  var currentQrData = '';
+
+  document.querySelectorAll('[data-qr-id]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var qrUrl = btn.dataset.qrUrl;
+      qrBody.innerHTML = '<p class="muted">Generating QR code…</p>';
+      shareStatus.textContent = '';
+      qrModal.hidden = false;
+      fetch(qrUrl + '?inline=1', {credentials: 'same-origin'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          currentUrl = data.url;
+          currentQrData = data.image;
+          qrBody.innerHTML = '<img src="' + data.image + '" alt="QR Code" style="max-width:220px;margin:12px auto;display:block;border-radius:8px;">' +
+            '<p style="word-break:break-all;font-size:.82rem;margin-top:12px;color:var(--muted);">' + data.url + '</p>';
+          downloadLink.href = qrUrl;
+        })
+        .catch(function() {
+          qrBody.innerHTML = '<p class="error-text">Could not generate QR code.</p>';
+        });
+    });
+  });
+
+  copyBtn.addEventListener('click', function() {
+    if (currentUrl) {
+      navigator.clipboard.writeText(currentUrl).then(function() {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(function() { copyBtn.textContent = 'Copy Link'; }, 2000);
+      });
+    }
+  });
+
+  shareBtn.addEventListener('click', function() {
+    if (!currentUrl) return;
+    shareStatus.textContent = '';
+    
+    if (!navigator.share) {
+      shareStatus.textContent = 'Sharing is not supported on this browser. Please use Copy Link or Download QR.';
+      return;
+    }
+
+    var shareData = {
+      title: "Join Quiz - C2C",
+      text: "Join this quiz using the link or scan the QR code.",
+      url: currentUrl
+    };
+
+    if (currentQrData) {
+      try {
+        var arr = currentQrData.split(',');
+        var mime = arr[0].match(/:(.*?);/)[1];
+        var bstr = atob(arr[1]);
+        var n = bstr.length;
+        var u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        var file = new File([u8arr], 'C2C-Quiz-QR.png', { type: mime });
+        
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          shareData.files = [file];
+        }
+      } catch (e) {
+        console.error("Error preparing QR file", e);
+      }
+    }
+
+    navigator.share(shareData).catch(function(err) {
+      console.log("Share cancelled or failed", err);
+    });
+  });
+
+  qrCloseBtn.addEventListener('click', function() { qrModal.hidden = true; });
+  qrModal.addEventListener('click', function(e) { if (e.target === qrModal) qrModal.hidden = true; });
+
+  /* Delete Confirmation Modal */
+  var deleteModal = document.getElementById('delete-modal');
+  var deleteCancel = document.getElementById('delete-cancel');
+  var deleteConfirm = document.getElementById('delete-confirm');
+  var formToSubmit = null;
+
+  document.querySelectorAll('form.delete-form').forEach(function(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      formToSubmit = form;
+      deleteModal.hidden = false;
+    });
+  });
+
+  deleteCancel.addEventListener('click', function() {
+    deleteModal.hidden = true;
+    formToSubmit = null;
+  });
+  
+  deleteModal.addEventListener('click', function(e) {
+    if (e.target === deleteModal) {
+      deleteModal.hidden = true;
+      formToSubmit = null;
+    }
+  });
+
+  deleteConfirm.addEventListener('click', function() {
+    if (formToSubmit) {
+      formToSubmit.submit();
+    }
+  });
+});
+</script>
+{% endblock %}

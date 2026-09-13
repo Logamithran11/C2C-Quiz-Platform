@@ -1,0 +1,139 @@
+{% extends 'base.html' %}
+{% block title %}{{ 'Edit Question Bank' if bank else 'Create Question Bank' }}{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">CREATOR WORKSPACE</span>
+    <h1>{{ 'Edit your question bank.' if bank else 'Create a new question bank.' }}</h1>
+  </div>
+  <a href="{{ url_for('banks') }}">← Question Banks</a>
+</div>
+<noscript><div class="alert">JavaScript is required to add questions.</div></noscript>
+<form method="post" id="bank-form" class="stack narrow-wide" data-questions="{{ initial_questions|tojson|forceescape }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="questions" id="questions-data">
+  
+  <section class="card stack">
+    <h2>Bank details</h2>
+    <label>Bank name
+      <input name="name" maxlength="150" required value="{{ bank.name if bank else '' }}" placeholder="e.g. Computer Science Basics">
+    </label>
+  </section>
+  
+  <div class="spread">
+    <h2>Questions</h2>
+    <span id="question-count" class="pill" aria-live="polite"></span>
+  </div>
+  <div id="questions" class="stack"></div>
+  <div class="actions">
+    <button class="button secondary" type="button" id="add-question">+ Add question</button>
+    <button class="button" type="submit">{{ 'Save changes' if bank else 'Create Question Bank' }}</button>
+  </div>
+  <p id="builder-error" class="error-text" role="alert"></p>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const form = document.getElementById('bank-form');
+  const list = document.getElementById('questions');
+  const errorBox = document.getElementById('builder-error');
+  let sequence = 0;
+
+  function renumber() {
+    const cards = [...list.children];
+    cards.forEach((card, index) => {
+      card.querySelector('h3').textContent = `Question ${index + 1}`;
+      card.querySelector('.remove-question').disabled = cards.length === 1;
+    });
+    document.getElementById('question-count').textContent = `${cards.length} question${cards.length === 1 ? '' : 's'}`;
+  }
+
+  function addQuestion(question = {text: '', options: ['', '', '', ''], correct_option: null}) {
+    const key = sequence++;
+    const card = document.createElement('section');
+    card.className = 'card question-editor stack';
+    card.innerHTML = '<div class="spread"><h3></h3><button type="button" class="button ghost small remove-question">Remove</button></div>';
+    const label = document.createElement('label');
+    label.textContent = 'Question text';
+    const text = document.createElement('textarea');
+    text.className = 'question-text';
+    text.required = true;
+    text.maxLength = 2000;
+    text.rows = 2;
+    text.value = question.text;
+    label.append(text);
+    card.append(label);
+    
+    const options = document.createElement('fieldset');
+    options.className = 'builder-options';
+    const legend = document.createElement('legend');
+    legend.textContent = 'Enter four distinct options and select the correct answer';
+    options.append(legend);
+    
+    for (let i = 0; i < 4; i++) {
+      const row = document.createElement('div');
+      row.className = 'builder-option';
+      const radioLabel = document.createElement('label');
+      radioLabel.className = 'correct-selector';
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = `correct_${key}`;
+      radio.value = String(i);
+      radio.required = true;
+      radio.checked = question.correct_option === i;
+      radioLabel.append(radio, document.createTextNode('ABCD'[i]));
+      const option = document.createElement('input');
+      option.type = 'text';
+      option.className = 'option-text';
+      option.required = true;
+      option.maxLength = 500;
+      option.placeholder = `Option ${'ABCD'[i]}`;
+      option.value = question.options[i];
+      row.append(radioLabel, option);
+      options.append(row);
+    }
+    card.append(options);
+    
+    card.querySelector('.remove-question').addEventListener('click', () => {
+      if (list.children.length > 1) {
+        card.remove();
+        renumber();
+        document.getElementById('add-question').focus();
+      }
+    });
+    list.append(card);
+    renumber();
+    return text;
+  }
+
+  const initial = JSON.parse(form.dataset.questions);
+  if (initial.length) initial.forEach(q => addQuestion(q));
+  else addQuestion();
+  
+  document.getElementById('add-question').addEventListener('click', (e) => {
+    e.preventDefault();
+    addQuestion(undefined).focus();
+  });
+  form.addEventListener('submit', (event) => {
+    errorBox.textContent = '';
+    const questions = [...list.children].map((card) => ({
+      text: card.querySelector('.question-text').value.trim(),
+      options: [...card.querySelectorAll('.option-text')].map((input) => input.value.trim()),
+      correct_option: Number(card.querySelector('input[type="radio"]:checked').value)
+    }));
+    
+    const invalid = questions.findIndex((q) => !q.text || q.options.some((opt) => !opt)
+      || new Set(q.options.map((opt) => opt.toLowerCase())).size !== 4);
+      
+    if (invalid !== -1) {
+      event.preventDefault();
+      errorBox.textContent = `Question ${invalid + 1}: enter question text and four nonempty, distinct options.`;
+      return;
+    }
+    
+    document.getElementById('questions-data').value = JSON.stringify(questions);
+  });
+});
+</script>
+{% endblock %}

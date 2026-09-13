@@ -1,0 +1,57 @@
+{% extends 'base.html' %}
+{% block title %}{{ 'Edit quiz' if quiz else 'Create quiz' }}{% endblock %}
+{% block scripts %}<script defer src="{{ url_for('static', filename='js/quiz_builder.js') }}"></script>{% endblock %}
+{% block content %}<div class="page-heading"><div><span class="eyebrow">QUIZ BUILDER</span><h1>{{ 'Refine your quiz.' if quiz else 'Create a new challenge.' }}</h1><p class="muted">Four options. One correct answer. Endless possibilities.</p></div><a href="{{ url_for('dashboard') }}">← Dashboard</a></div>
+<noscript><div class="alert">JavaScript is required to add questions and save quizzes.</div></noscript>
+<form method="post" id="quiz-form" class="stack narrow-wide" data-questions="{{ initial_questions|tojson|forceescape }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="quiz_data" id="quiz-data">
+<section class="card stack">
+  <h2>Quiz details</h2>
+  <label>Quiz title<input id="quiz-title" maxlength="150" required value="{{ quiz.title if quiz else '' }}" placeholder="e.g. Computer Science · Weekly Challenge"></label>
+  <label>Description<textarea id="quiz-description" maxlength="3000" rows="3" placeholder="What should students know before they start?">{{ quiz.description if quiz else '' }}</textarea></label>
+  <label>Instructions (Shown to student before starting)<textarea id="quiz-instructions" maxlength="3000" rows="3" placeholder="Specific instructions for taking the quiz">{{ quiz.instructions if quiz else '' }}</textarea></label>
+  <label>Time limit (minutes)<input id="quiz-time" type="number" min="1" max="1440" step="1" required value="{{ quiz.time_limit if quiz else 15 }}"></label>
+  
+  <label>Question Source</label>
+  <div class="settings-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 16px;">
+    <div class="setting-group"><label><input type="radio" name="question_source" value="manual" id="source-manual" {% if not quiz or not quiz.bank_id %}checked{% endif %}> Manual Questions</label></div>
+    <div class="setting-group"><label><input type="radio" name="question_source" value="bank" id="source-bank" {% if quiz and quiz.bank_id %}checked{% endif %} {% if not banks %}disabled{% endif %}> Question Bank</label></div>
+  </div>
+  {% if not banks %}
+  <p class="muted">No question banks available. Create one in the Question Banks section to reuse questions.</p>
+  {% endif %}
+
+  <div id="bank-selection-area" style="display: {% if quiz and quiz.bank_id %}block{% else %}none{% endif %}; border: 1px solid var(--border); padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+    <label>Question Bank
+      <select id="quiz-bank-id" name="bank_id">
+        <option value="">Select a question bank ▼</option>
+        {% for bank in banks %}
+        <option value="{{ bank.id }}" data-count="{{ bank.question_count }}" {% if quiz and quiz.bank_id == bank.id %}selected{% endif %}>{{ bank.name }} ({{ bank.question_count }} questions)</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p id="bank-available-count" class="muted"></p>
+    
+    <label>Number of questions to include
+      <input type="number" id="quiz-bank-count" name="bank_question_count" min="1" value="{{ quiz.bank_question_count if quiz and quiz.bank_question_count else '' }}">
+    </label>
+    <p class="muted">Select how many questions should be taken from this question bank.</p>
+  </div>
+
+  <small class="muted">Editing is available until the first student starts an attempt.</small>
+</section>
+<section class="card stack"><h2>Settings</h2>
+<div class="settings-grid">
+  <div class="setting-group"><label class="setting-label"><input type="checkbox" id="pass-fail-enabled" {% if quiz and quiz.pass_fail_enabled %}checked{% endif %}> Enable Pass/Fail</label></div>
+  <div class="setting-group"><label>Pass Percentage (%)<input type="number" id="pass-percentage" min="1" max="100" step="1" value="{{ quiz.pass_percentage if quiz else 50 }}" style="width:100px"></label></div>
+  <div class="setting-group"><label class="setting-label"><input type="checkbox" id="randomize-questions" {% if quiz and quiz.randomize_questions %}checked{% endif %}> Randomize question order</label></div>
+  <div class="setting-group"><label class="setting-label"><input type="checkbox" id="randomize-options" {% if quiz and quiz.randomize_options %}checked{% endif %}> Randomize answer options</label></div>
+  <div class="setting-group"><label>Start Date/Time<input type="datetime-local" id="scheduled-start" value="{{ quiz.scheduled_start_iso if quiz and quiz.scheduled_start else '' }}"></label></div>
+  <div class="setting-group"><label>End Date/Time<input type="datetime-local" id="scheduled-end" value="{{ quiz.scheduled_end_iso if quiz and quiz.scheduled_end else '' }}"></label></div>
+</div>
+</section>
+<div id="manual-questions-area" style="display: {% if quiz and quiz.bank_id %}none{% else %}block{% endif %};">
+  <div class="spread"><h2>Questions</h2><span id="question-count" class="pill" aria-live="polite"></span></div><div id="questions" class="stack"></div><div class="actions"><button class="button secondary" type="button" id="add-question">+ Add question</button></div>
+</div>
+
+<div class="actions" style="margin-top: 16px;"><button class="button" type="submit" style="width: 100%;">{{ 'Save changes' if quiz else 'Save & create share link' }}</button></div><p id="builder-error" class="error-text" role="alert"></p></form>
+{% endblock %}

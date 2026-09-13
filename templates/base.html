@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta name="theme-color" content="#123453">
+  <title>{% block title %}Smart Quiz & Assessment Platform{% endblock %} | C2C</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/logo1.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script defer src="{{ url_for('static', filename='js/common.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <a class="brand" href="{{ url_for('home') }}"><img class="brand-logo" src="{{ url_for('static', filename='images/logo1.png') }}" alt="Hindusthan College of Technology, Salem – Tamil Nadu" width="200" height="56"><span class="brand-text"><strong>COLLEGE TO CAMPUS (C2C)</strong><small>Smart Quiz &amp; Assessment Platform</small></span></a>
+  <nav aria-label="Main navigation">
+    <a href="{{ url_for('join_quiz') }}">Join a quiz</a>
+    {% if g.creator %}
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('banks') }}">Question Banks</a>
+      <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button ghost small" type="submit">Log out</button></form>
+    {% else %}
+      <a href="{{ url_for('login') }}">Log in</a>
+      <a class="button small" href="{{ url_for('register') }}">Create account</a>
+    {% endif %}
+  </nav>
+</header>
+<main id="main" class="container">
+  {% for category, message in get_flashed_messages(with_categories=true) %}<div class="alert {{ category }}" role="status">{{ message }}</div>{% endfor %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="site-footer"><div class="footer-info"><strong>C2C</strong> College to Campus · Hindusthan College of Technology, Salem – Tamil Nadu <div style="margin-top: 5px; font-size: 0.75rem;">Designed &amp; Developed by <strong style="color: var(--navy); letter-spacing: 0.03em;">LOGAMITHRAN BS</strong></div></div> <span>Built for curious minds. Designed for your campus.</span></footer>
+</body>
+</html>
