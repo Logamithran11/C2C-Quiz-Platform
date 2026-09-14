@@ -68,18 +68,18 @@ def results_pdf(quiz, results):
     ]))
     content.append(info_table)
     content.append(Spacer(1, 12))
-    content.append(Paragraph('<i>Ranking: Score descending, then time taken ascending. All timestamps are UTC.</i>', cell))
+    content.append(Paragraph('<i>Ranking: Score descending, then time taken ascending. All timestamps are IST.</i>', cell))
     content.append(Spacer(1, 8))
     
     # TABLE
     headings = ['Rank', 'Student', 'Roll no.', 'Score', '%']
     if quiz['pass_fail_enabled']:
         headings.append('Status')
-    headings.extend(['Correct', 'Wrong', 'Blank', 'Time (s)', 'Submitted (UTC)'])
+    headings.extend(['Correct', 'Wrong', 'Blank', 'Time (s)', 'Submitted (IST)'])
     
     data = [[paragraph(value, header_cell) for value in headings]]
     for rank, result in enumerate(results, 1):
-        submitted = datetime.fromtimestamp(result['submitted_at'], timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        submitted = datetime.fromtimestamp(result['submitted_at'], __import__('zoneinfo').ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %I:%M:%S %p')
         values = [rank, result['name'], result['roll_number'], f"{result['score']}/{result['total']}",
                   f"{result['percentage']:.2f}"]
         if quiz['pass_fail_enabled']:

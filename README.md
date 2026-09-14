@@ -6,8 +6,8 @@
 
 - Python 3.10 or newer (CI uses Python 3.12).
 - A modern browser with JavaScript and cookies enabled.
-- Flask and ReportLab for the application; pytest for tests. `sqlite3` is included with Python. Werkzeug (provided by Flask) handles password hashing.
-- No Node, React, MongoDB, SQLAlchemy, frontend build step, or external database service.
+- Flask and ReportLab for the application; pytest for tests. Werkzeug (provided by Flask) handles password hashing.
+- Uses MongoDB Atlas as the primary database (PyMongo), while retaining legacy SQLite/PostgreSQL code during migration.
 
 ## Installation
 
@@ -71,7 +71,9 @@ Optional environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `SECRET_KEY` | Required random session-signing key, at least 32 characters |
-| `DATABASE_PATH` | SQLite path; default is `instance/c2c.sqlite3` |
+| `MONGODB_URI` | Required connection string for MongoDB Atlas |
+| `DATABASE_URL`| (Legacy) PostgreSQL connection string |
+| `DATABASE_PATH` | (Legacy) SQLite path; default is `instance/c2c.sqlite3` |
 | `COOKIE_SECURE` | Set to `1` when served over HTTPS; leave unset for local HTTP |
 
 ## Using C2C

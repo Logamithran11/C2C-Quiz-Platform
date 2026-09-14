@@ -3,17 +3,17 @@ import json
 import os
 import re
 import secrets
-import psycopg2
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
+from pymongo.errors import DuplicateKeyError
 
 from flask import (Flask, abort, flash, g, jsonify, make_response, redirect,
                    render_template, request, send_file, session, url_for)
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import get_db, init_app
+from db import get_db, init_app, get_next_sequence_value, to_dict, to_dict_list
 from quiz_service import (clean_text, now, process_attempt, ranked_results,
                           save_quiz, start_attempt)
 from reports import results_pdf
@@ -42,16 +42,19 @@ def create_app(test_config=None):
 
     app.jinja_env.globals['csrf_token'] = csrf_token
 
-    @app.template_filter('utc')
-    def format_utc(timestamp):
-        return datetime.fromtimestamp(timestamp, timezone.utc).strftime('%d %b %Y, %H:%M UTC') if timestamp is not None else 'In progress'
+    @app.template_filter('ist')
+    def format_ist(timestamp):
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(timestamp, ZoneInfo("Asia/Kolkata")).strftime('%d %b %Y, %I:%M %p IST') if timestamp is not None else 'In progress'
 
     @app.before_request
     def load_user_and_check_csrf():
+        if 'csrf_token' not in session:
+            session['csrf_token'] = secrets.token_urlsafe(32)
+            
         g.creator = None
         if session.get('creator_id'):
-            g.creator = get_db().execute('SELECT id, name, email FROM creators WHERE id = %s',
-                                         (session['creator_id'],)).fetchone()
+            g.creator = to_dict(get_db().creators.find_one({'_id': session['creator_id']}))
         if request.method == 'POST':
             supplied = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token', '')
             expected = session.get('csrf_token', '')
@@ -95,21 +98,18 @@ def create_app(test_config=None):
         return wrapped
 
     def owned_quiz(quiz_id):
-        # Flask integers are unbounded, but SQLite IDs are signed 64-bit integers.
         if not 1 <= quiz_id <= 2 ** 63 - 1:
             abort(404, description='Quiz not found.')
-        quiz = get_db().execute('SELECT q.*, (SELECT count(*) FROM questions WHERE quiz_id = q.id) '
-                                'AS question_count FROM quizzes q WHERE q.id = %s AND q.creator_id = %s',
-                                (quiz_id, g.creator['id'])).fetchone()
+        quiz = to_dict(get_db().quizzes.find_one({'_id': quiz_id, 'creator_id': g.creator['id']}))
         if quiz is None:
             abort(404, description='Quiz not found.')
+        quiz['question_count'] = get_db().questions.count_documents({'quiz_id': quiz_id})
         return quiz
 
     def student_attempt(attempt_id):
         if not 1 <= attempt_id <= 2 ** 63 - 1:
             abort(404, description='This quiz is no longer available.')
-        attempt = get_db().execute('SELECT * FROM attempts WHERE id = %s AND browser_token = %s',
-                                   (attempt_id, session.get('student_token', ''))).fetchone()
+        attempt = to_dict(get_db().attempts.find_one({'_id': attempt_id, 'browser_token': session.get('student_token', '')}))
         if attempt is None:
             abort(404, description='This quiz is no longer available.')
         return attempt
@@ -138,10 +138,15 @@ def create_app(test_config=None):
                 raise ValueError('Passwords do not match.')
             db = get_db()
             try:
-                with db:
-                    db.execute('INSERT INTO creators (name, email, password_hash, created_at) VALUES (%s, %s, %s, %s) RETURNING id',
-                               (name, email, generate_password_hash(password), now()))
-            except psycopg2.IntegrityError:
+                creator_id = get_next_sequence_value('creators')
+                db.creators.insert_one({
+                    '_id': creator_id,
+                    'name': name,
+                    'email': email,
+                    'password_hash': generate_password_hash(password),
+                    'created_at': now()
+                })
+            except DuplicateKeyError:
                 raise ValueError('An account with that email already exists.') from None
             flash('Account created. Log in to build your first quiz.', 'success')
             return redirect(url_for('login'))
@@ -152,7 +157,7 @@ def create_app(test_config=None):
         if request.method == 'POST':
             email = request.form.get('email', '').strip().casefold()
             password = request.form.get('password', '')
-            creator = get_db().execute('SELECT * FROM creators WHERE email = %s', (email,)).fetchone()
+            creator = to_dict(get_db().creators.find_one({'email': email}))
             if len(password) > 128 or not creator or not check_password_hash(creator['password_hash'], password):
                 raise ValueError('Incorrect email or password.')
             student_token = session.get('student_token')
@@ -172,21 +177,21 @@ def create_app(test_config=None):
     @app.get('/dashboard')
     @login_required
     def dashboard():
-        quizzes = get_db().execute('SELECT q.*, '
-            '(SELECT count(*) FROM questions WHERE quiz_id = q.id) AS question_count, '
-            '(SELECT count(*) FROM attempts WHERE quiz_id = q.id) AS participant_count '
-            'FROM quizzes q WHERE creator_id = %s ORDER BY created_at DESC, id DESC', (g.creator['id'],)).fetchall()
+        db = get_db()
+        quizzes = to_dict_list(db.quizzes.find({'creator_id': g.creator['id']}).sort([('created_at', -1), ('_id', -1)]))
         
         quiz_list = []
         current_time = now()
-        for q in quizzes:
-            q_dict = dict(q)
+        for q_dict in quizzes:
+            q_dict['question_count'] = db.questions.count_documents({'quiz_id': q_dict['id']})
+            q_dict['participant_count'] = db.attempts.count_documents({'quiz_id': q_dict['id']})
+            
             status = 'LIVE'
-            if q_dict['scheduled_start'] and current_time < q_dict['scheduled_start']:
+            if q_dict.get('scheduled_start') and current_time < q_dict['scheduled_start']:
                 status = 'SCHEDULED'
-            elif q_dict['scheduled_end'] and current_time > q_dict['scheduled_end']:
+            elif q_dict.get('scheduled_end') and current_time > q_dict['scheduled_end']:
                 status = 'ENDED'
-            elif q_dict['participant_count'] == 0 and not q_dict['scheduled_start'] and not q_dict['scheduled_end']:
+            elif q_dict['participant_count'] == 0 and not q_dict.get('scheduled_start') and not q_dict.get('scheduled_end'):
                 status = 'DRAFT'
             q_dict['status'] = status
             quiz_list.append(q_dict)
@@ -200,7 +205,12 @@ def create_app(test_config=None):
             save_quiz(g.creator['id'], quiz_form_data())
             flash('Quiz created. Share the link or code with your students.', 'success')
             return redirect(url_for('dashboard'))
-        banks = get_db().execute('SELECT b.*, (SELECT count(*) FROM bank_questions WHERE bank_id = b.id) AS question_count FROM question_banks b WHERE creator_id = %s ORDER BY name ASC', (g.creator['id'],)).fetchall()
+        
+        db = get_db()
+        banks = to_dict_list(db.question_banks.find({'creator_id': g.creator['id']}).sort('name', 1))
+        for bank in banks:
+            bank['question_count'] = db.bank_questions.count_documents({'bank_id': bank['id']})
+            
         return render_template('create_quiz.html', quiz=None, initial_questions=[], banks=banks)
 
     @app.route('/quizzes/<int:quiz_id>/edit', methods=['GET', 'POST'])
@@ -212,21 +222,27 @@ def create_app(test_config=None):
         if quiz.get('scheduled_end'):
             quiz['scheduled_end_iso'] = datetime.fromtimestamp(quiz['scheduled_end']).strftime("%Y-%m-%dT%H:%M")
         
-        if get_db().execute('SELECT 1 FROM attempts WHERE quiz_id = %s', (quiz_id,)).fetchone():
+        db = get_db()
+        if db.attempts.find_one({'quiz_id': quiz_id}):
             abort(409, description='This quiz is locked because a student has already attempted it.')
+        
         if request.method == 'POST':
             save_quiz(g.creator['id'], quiz_form_data(), quiz_id)
             flash('Quiz updated.', 'success')
             return redirect(url_for('dashboard'))
-        questions = get_db().execute('SELECT * FROM questions WHERE quiz_id = %s ORDER BY position', (quiz_id,)).fetchall()
+            
+        questions = to_dict_list(db.questions.find({'quiz_id': quiz_id}).sort('position', 1))
         initial = [{'text': q['text'], 'options': [q[f'option_{i}'] for i in range(4)],
                     'correct_option': q['correct_option']} for q in questions]
-        banks = get_db().execute('SELECT b.*, (SELECT count(*) FROM bank_questions WHERE bank_id = b.id) AS question_count FROM question_banks b WHERE creator_id = %s ORDER BY name ASC', (g.creator['id'],)).fetchall()
+                    
+        banks = to_dict_list(db.question_banks.find({'creator_id': g.creator['id']}).sort('name', 1))
+        for bank in banks:
+            bank['question_count'] = db.bank_questions.count_documents({'bank_id': bank['id']})
+            
         return render_template('edit_quiz.html', quiz=quiz, initial_questions=initial, banks=banks)
 
-
     def owned_bank(bank_id):
-        bank = get_db().execute('SELECT * FROM question_banks WHERE id = %s', (bank_id,)).fetchone()
+        bank = to_dict(get_db().question_banks.find_one({'_id': bank_id}))
         if not bank:
             abort(404, description='Question bank not found.')
         if bank['creator_id'] != g.creator['id']:
@@ -236,9 +252,10 @@ def create_app(test_config=None):
     @app.get('/banks')
     @login_required
     def banks():
-        banks = get_db().execute('SELECT b.*, (SELECT count(*) FROM bank_questions WHERE bank_id = b.id) '
-                                 'AS question_count FROM question_banks b WHERE creator_id = %s '
-                                 'ORDER BY created_at DESC', (g.creator['id'],)).fetchall()
+        db = get_db()
+        banks = to_dict_list(db.question_banks.find({'creator_id': g.creator['id']}).sort('created_at', -1))
+        for bank in banks:
+            bank['question_count'] = db.bank_questions.count_documents({'bank_id': bank['id']})
         return render_template('banks.html', banks=banks)
 
     @app.route('/banks/new', methods=['GET', 'POST'])
@@ -250,16 +267,31 @@ def create_app(test_config=None):
                 raise ValueError('Bank name is required.')
             db = get_db()
             
-            with db:
-                cursor = db.execute('INSERT INTO question_banks (creator_id, name, created_at) VALUES (%s, %s, %s) RETURNING id',
-                                    (g.creator['id'], name, now()))
-                bank_id = cursor.fetchone()['id']
-                questions = json.loads(request.form.get('questions', '[]'))
+            bank_id = get_next_sequence_value('question_banks')
+            db.question_banks.insert_one({
+                '_id': bank_id,
+                'creator_id': g.creator['id'],
+                'name': name,
+                'created_at': now()
+            })
+            
+            questions = json.loads(request.form.get('questions', '[]'))
+            if questions:
+                docs = []
                 for i, q in enumerate(questions):
-                    db.execute('INSERT INTO bank_questions (bank_id, position, text, option_0, option_1, option_2, option_3, correct_option) '
-                               'VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                               (bank_id, i, q['text'].strip(), q['options'][0].strip(), q['options'][1].strip(),
-                                q['options'][2].strip(), q['options'][3].strip(), int(q['correct_option'])))
+                    docs.append({
+                        '_id': get_next_sequence_value('bank_questions'),
+                        'bank_id': bank_id,
+                        'position': i,
+                        'text': q['text'].strip(),
+                        'option_0': q['options'][0].strip(),
+                        'option_1': q['options'][1].strip(),
+                        'option_2': q['options'][2].strip(),
+                        'option_3': q['options'][3].strip(),
+                        'correct_option': int(q['correct_option'])
+                    })
+                db.bank_questions.insert_many(docs)
+                
             flash('Question bank created.', 'success')
             return redirect(url_for('banks'))
         return render_template('edit_bank.html', bank=None, initial_questions=[])
@@ -268,25 +300,37 @@ def create_app(test_config=None):
     @login_required
     def edit_bank(bank_id):
         bank = owned_bank(bank_id)
+        db = get_db()
         if request.method == 'POST':
             name = request.form.get('name', '').strip()
             if not name:
                 raise ValueError('Bank name is required.')
-            db = get_db()
             
-            with db:
-                db.execute('UPDATE question_banks SET name = %s WHERE id = %s', (name, bank_id))
-                db.execute('DELETE FROM bank_questions WHERE bank_id = %s', (bank_id,))
-                questions = json.loads(request.form.get('questions', '[]'))
+            db.question_banks.update_one({'_id': bank_id}, {'$set': {'name': name}})
+            db.bank_questions.delete_many({'bank_id': bank_id})
+            
+            questions = json.loads(request.form.get('questions', '[]'))
+            if questions:
+                docs = []
                 for i, q in enumerate(questions):
-                    db.execute('INSERT INTO bank_questions (bank_id, position, text, option_0, option_1, option_2, option_3, correct_option) '
-                               'VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                               (bank_id, i, q['text'].strip(), q['options'][0].strip(), q['options'][1].strip(),
-                                q['options'][2].strip(), q['options'][3].strip(), int(q['correct_option'])))
+                    docs.append({
+                        '_id': get_next_sequence_value('bank_questions'),
+                        'bank_id': bank_id,
+                        'position': i,
+                        'text': q['text'].strip(),
+                        'option_0': q['options'][0].strip(),
+                        'option_1': q['options'][1].strip(),
+                        'option_2': q['options'][2].strip(),
+                        'option_3': q['options'][3].strip(),
+                        'correct_option': int(q['correct_option'])
+                    })
+                db.bank_questions.insert_many(docs)
+                
             flash('Question bank updated.', 'success')
             return redirect(url_for('banks'))
-        questions = get_db().execute('SELECT * FROM bank_questions WHERE bank_id = %s ORDER BY position', (bank_id,)).fetchall()
-        initial = [{'text': q['text'], 'options': [q[f'option_{i}'] for i in range(4)],
+            
+        questions = to_dict_list(db.bank_questions.find({'bank_id': bank_id}).sort('position', 1))
+        initial = [{'text': q['text'], 'options': [q.get(f'option_{i}') for i in range(4)],
                     'correct_option': q['correct_option']} for q in questions]
         return render_template('edit_bank.html', bank=bank, initial_questions=initial)
 
@@ -295,16 +339,13 @@ def create_app(test_config=None):
     def delete_bank(bank_id):
         owned_bank(bank_id)
         db = get_db()
-        if db.execute('SELECT 1 FROM quizzes WHERE bank_id = %s', (bank_id,)).fetchone():
+        if db.quizzes.find_one({'bank_id': bank_id}):
             abort(409, description='This question bank is used by an existing quiz and cannot be deleted.')
         
-        with db:
-            db.execute('DELETE FROM bank_questions WHERE bank_id = %s', (bank_id,))
-            db.execute('DELETE FROM question_banks WHERE id = %s', (bank_id,))
+        db.bank_questions.delete_many({'bank_id': bank_id})
+        db.question_banks.delete_one({'_id': bank_id})
         flash('Question bank deleted.', 'success')
         return redirect(url_for('banks'))
-
-
 
 
     @app.route('/join', methods=['GET', 'POST'])
@@ -312,11 +353,13 @@ def create_app(test_config=None):
     def join_quiz(code=None):
         code = (code or request.values.get('code', '')).strip().upper()
         quiz = None
+        db = get_db()
         if code:
-            quiz = get_db().execute('SELECT q.*, (SELECT count(*) FROM questions WHERE quiz_id = q.id) '
-                                    'AS question_count FROM quizzes q WHERE code = %s', (code,)).fetchone()
+            quiz = to_dict(db.quizzes.find_one({'code': code}))
             if quiz is None:
                 raise ValueError('Quiz code not found. Check the code with your creator.')
+            quiz['question_count'] = db.questions.count_documents({'quiz_id': quiz['id']})
+            
         if request.method == 'POST':
             if quiz is None:
                 raise ValueError('Enter a quiz code.')
@@ -331,14 +374,17 @@ def create_app(test_config=None):
     def take_quiz(attempt_id):
         student_attempt(attempt_id)
         attempt = process_attempt(attempt_id)
-        if attempt['submitted_at'] is not None:
+        if attempt.get('submitted_at') is not None:
             return redirect(url_for('result', attempt_id=attempt_id))
-        quiz = get_db().execute('SELECT * FROM quizzes WHERE id = %s', (attempt['quiz_id'],)).fetchone()
-        # Explicit column list: the answer key is never part of the student payload.
-        questions = get_db().execute('SELECT id, position, text, option_0, option_1, option_2, option_3 '
-                                      'FROM questions WHERE quiz_id = %s ORDER BY position', (quiz['id'],)).fetchall()
+            
+        db = get_db()
+        quiz = to_dict(db.quizzes.find_one({'_id': attempt['quiz_id']}))
+        
+        # We need id, position, text, option_0, option_1, option_2, option_3
+        q_cursor = db.questions.find({'quiz_id': quiz['id']}, {'correct_option': 0}).sort('position', 1)
+        questions = to_dict_list(q_cursor)
                                       
-        if attempt['question_order']:
+        if attempt.get('question_order'):
             order_data = json.loads(attempt['question_order'])
             q_order = order_data.get('questions')
             o_map = order_data.get('options', {})
@@ -357,8 +403,9 @@ def create_app(test_config=None):
         else:
             questions = [dict(q) for q in questions]
             
-        saved = {str(row['question_id']): row['selected_option'] for row in get_db().execute(
-            'SELECT question_id, selected_option FROM answers WHERE attempt_id = %s', (attempt_id,))}
+        answers_cursor = db.answers.find({'attempt_id': attempt_id})
+        saved = {str(row['question_id']): row['selected_option'] for row in answers_cursor}
+        
         return render_template('take_quiz.html', quiz=quiz, attempt=attempt, questions=questions,
                                saved=saved, server_now=now())
 
@@ -369,7 +416,7 @@ def create_app(test_config=None):
         if not isinstance(data, dict) or not isinstance(data.get('answers'), dict):
             raise ValueError('Provide an answers object to save.')
         attempt = process_attempt(attempt_id, data['answers'])
-        return jsonify(submitted=attempt['submitted_at'] is not None, deadline=attempt['deadline'],
+        return jsonify(submitted=attempt.get('submitted_at') is not None, deadline=attempt['deadline'],
                        server_now=now(), result_url=url_for('result', attempt_id=attempt_id))
 
     @app.post('/attempts/<int:attempt_id>/submit')
@@ -385,9 +432,9 @@ def create_app(test_config=None):
     def result(attempt_id):
         student_attempt(attempt_id)
         attempt = process_attempt(attempt_id)
-        if attempt['submitted_at'] is None:
+        if attempt.get('submitted_at') is None:
             return redirect(url_for('take_quiz', attempt_id=attempt_id))
-        quiz = get_db().execute('SELECT * FROM quizzes WHERE id = %s', (attempt['quiz_id'],)).fetchone()
+        quiz = to_dict(get_db().quizzes.find_one({'_id': attempt['quiz_id']}))
         return render_template('result.html', result=attempt, quiz=quiz)
 
     @app.get('/quizzes/<int:quiz_id>/results')
@@ -395,8 +442,8 @@ def create_app(test_config=None):
     def quiz_results(quiz_id):
         quiz = owned_quiz(quiz_id)
         results = ranked_results(quiz_id)
-        active = get_db().execute('SELECT count(*) FROM attempts WHERE quiz_id = %s AND submitted_at IS NULL',
-                                  (quiz_id,)).fetchone()[0]
+        db = get_db()
+        active = db.attempts.count_documents({'quiz_id': quiz_id, 'submitted_at': None})
                                   
         analytics = None
         if results:
@@ -404,20 +451,32 @@ def create_app(test_config=None):
             high_score = max(r['score'] for r in results)
             low_score = min(r['score'] for r in results)
             avg_percent = round(sum(r['percentage'] for r in results) / len(results), 1)
-            pass_count = sum(1 for r in results if r['percentage'] >= quiz['pass_percentage']) if quiz['pass_fail_enabled'] else 0
-            fail_count = len(results) - pass_count if quiz['pass_fail_enabled'] else 0
+            pass_count = sum(1 for r in results if r['percentage'] >= quiz.get('pass_percentage', 50)) if quiz.get('pass_fail_enabled') else 0
+            fail_count = len(results) - pass_count if quiz.get('pass_fail_enabled') else 0
             
-            db = get_db()
-            q_stats = db.execute('''
-                SELECT q.position, q.text, count(a.selected_option) as answered,
-                sum(case when a.selected_option = q.correct_option then 1 else 0 end) as correct
-                FROM questions q
-                JOIN attempts att ON att.quiz_id = q.quiz_id AND att.submitted_at IS NOT NULL
-                LEFT JOIN answers a ON q.id = a.question_id AND a.attempt_id = att.id
-                WHERE q.quiz_id = %s
-                GROUP BY q.id
-                ORDER BY q.position
-            ''', (quiz_id,)).fetchall()
+            # Reimplementing the complex SQL JOIN in Python
+            q_stats = []
+            questions = to_dict_list(db.questions.find({'quiz_id': quiz_id}).sort('position', 1))
+            
+            # Fetch all answers for submitted attempts
+            submitted_attempt_ids = [r['id'] for r in results]
+            answers = to_dict_list(db.answers.find({
+                'attempt_id': {'$in': submitted_attempt_ids},
+                'quiz_id': quiz_id
+            }))
+            
+            for q in questions:
+                q_id = q['id']
+                q_answers = [a for a in answers if a['question_id'] == q_id]
+                answered_count = len(q_answers)
+                correct_count = sum(1 for a in q_answers if a.get('selected_option') == q['correct_option'])
+                
+                q_stats.append({
+                    'position': q['position'],
+                    'text': q['text'],
+                    'answered': answered_count,
+                    'correct': correct_count
+                })
             
             analytics = {
                 'avg_score': avg_score, 'high_score': high_score, 'low_score': low_score,
@@ -431,24 +490,32 @@ def create_app(test_config=None):
     def live_stats(quiz_id):
         quiz = owned_quiz(quiz_id)
         db = get_db()
-        total_attempts = db.execute(
-            'SELECT count(*) FROM attempts WHERE quiz_id = %s', (quiz_id,)).fetchone()[0]
-        submitted_count = db.execute(
-            'SELECT count(*) FROM attempts WHERE quiz_id = %s AND submitted_at IS NOT NULL', (quiz_id,)).fetchone()[0]
+        total_attempts = db.attempts.count_documents({'quiz_id': quiz_id})
+        submitted_count = db.attempts.count_documents({'quiz_id': quiz_id, 'submitted_at': {'$ne': None}})
         in_progress = total_attempts - submitted_count
         avg_score = 0
         if submitted_count > 0:
-            avg_score = round(db.execute(
-                'SELECT avg(percentage) FROM attempts WHERE quiz_id = %s AND submitted_at IS NOT NULL',
-                (quiz_id,)).fetchone()[0] or 0, 1)
-        active_attempts = db.execute('''
-            SELECT a.name, a.roll_number,
-                   (SELECT count(*) FROM answers ans WHERE ans.attempt_id = a.id) as answered,
-                   (SELECT count(*) FROM questions q WHERE q.quiz_id = %s) as total_q
-            FROM attempts a
-            WHERE a.quiz_id = %s AND a.submitted_at IS NULL
-            ORDER BY a.started_at DESC
-        ''', (quiz_id, quiz_id)).fetchall()
+            pipeline = [
+                {'$match': {'quiz_id': quiz_id, 'submitted_at': {'$ne': None}}},
+                {'$group': {'_id': None, 'avg_percentage': {'$avg': '$percentage'}}}
+            ]
+            agg = list(db.attempts.aggregate(pipeline))
+            if agg:
+                avg_score = round(agg[0]['avg_percentage'] or 0, 1)
+                
+        active_cursor = db.attempts.find({'quiz_id': quiz_id, 'submitted_at': None}).sort('started_at', -1)
+        active_attempts = []
+        total_q = db.questions.count_documents({'quiz_id': quiz_id})
+        
+        for a in active_cursor:
+            ans_count = db.answers.count_documents({'attempt_id': a['_id']})
+            active_attempts.append({
+                'name': a['name'],
+                'roll_number': a['roll_number'],
+                'answered': ans_count,
+                'total_q': total_q
+            })
+            
         return {
             'total': total_attempts,
             'submitted': submitted_count,
@@ -456,7 +523,7 @@ def create_app(test_config=None):
             'completion': round(submitted_count * 100 / total_attempts, 1) if total_attempts else 0,
             'avg_score': avg_score,
             'active_count': len(active_attempts),
-            'participants': [dict(row) for row in active_attempts]
+            'participants': active_attempts
         }
 
     @app.get('/quizzes/<int:quiz_id>/leaderboard')
@@ -485,17 +552,17 @@ def create_app(test_config=None):
         writer = csv.writer(si)
         
         headings = ['Rank', 'Student', 'Roll no.', 'Score', 'Total', 'Percentage']
-        if quiz['pass_fail_enabled']:
+        if quiz.get('pass_fail_enabled'):
             headings.append('Status')
-        headings.extend(['Correct', 'Wrong', 'Unanswered', 'Time (s)', 'Submitted (UTC)'])
+        headings.extend(['Correct', 'Wrong', 'Unanswered', 'Time (s)', 'Submitted (IST)'])
         
         writer.writerow(headings)
         
         for rank, result in enumerate(results, 1):
-            submitted = datetime.fromtimestamp(result['submitted_at'], timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            submitted = datetime.fromtimestamp(result['submitted_at'], __import__('zoneinfo').ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %I:%M:%S %p')
             row = [rank, result['name'], result['roll_number'], result['score'], result['total'], result['percentage']]
-            if quiz['pass_fail_enabled']:
-                row.append('PASS' if result['percentage'] >= quiz['pass_percentage'] else 'FAIL')
+            if quiz.get('pass_fail_enabled'):
+                row.append('PASS' if result['percentage'] >= quiz.get('pass_percentage', 50) else 'FAIL')
             row.extend([result['correct'], result['wrong'], result['unanswered'], result['time_taken'], submitted])
             writer.writerow(row)
             
@@ -533,15 +600,15 @@ def create_app(test_config=None):
         ws = wb.active
         ws.title = 'Results'
         headings = ['Rank', 'Student', 'Roll no.', 'Score', 'Total', 'Percentage']
-        if quiz['pass_fail_enabled']:
+        if quiz.get('pass_fail_enabled'):
             headings.append('Status')
-        headings.extend(['Correct', 'Wrong', 'Unanswered', 'Time (s)', 'Submitted (UTC)'])
+        headings.extend(['Correct', 'Wrong', 'Unanswered', 'Time (s)', 'Submitted (IST)'])
         ws.append(headings)
         for rank, result in enumerate(results, 1):
-            submitted = datetime.fromtimestamp(result['submitted_at'], timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            submitted = datetime.fromtimestamp(result['submitted_at'], __import__('zoneinfo').ZoneInfo('Asia/Kolkata')).strftime('%Y-%m-%d %I:%M:%S %p')
             row = [rank, result['name'], result['roll_number'], result['score'], result['total'], result['percentage']]
-            if quiz['pass_fail_enabled']:
-                row.append('PASS' if result['percentage'] >= quiz['pass_percentage'] else 'FAIL')
+            if quiz.get('pass_fail_enabled'):
+                row.append('PASS' if result['percentage'] >= quiz.get('pass_percentage', 50) else 'FAIL')
             row.extend([result['correct'], result['wrong'], result['unanswered'], result['time_taken'], submitted])
             ws.append(row)
         buf = BytesIO()
@@ -556,11 +623,11 @@ def create_app(test_config=None):
         quiz = owned_quiz(quiz_id)
         db = get_db()
         
-        with db:
-            db.execute('DELETE FROM answers WHERE quiz_id = %s', (quiz_id,))
-            db.execute('DELETE FROM attempts WHERE quiz_id = %s', (quiz_id,))
-            db.execute('DELETE FROM questions WHERE quiz_id = %s', (quiz_id,))
-            db.execute('DELETE FROM quizzes WHERE id = %s', (quiz_id,))
+        db.answers.delete_many({'quiz_id': quiz_id})
+        db.attempts.delete_many({'quiz_id': quiz_id})
+        db.questions.delete_many({'quiz_id': quiz_id})
+        db.quizzes.delete_one({'_id': quiz_id})
+        
         flash('Quiz deleted successfully.', 'success')
         return redirect(url_for('dashboard'))
 
