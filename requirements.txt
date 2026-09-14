@@ -7,3 +7,4 @@ pymongo
 openpyxl
 qrcode
 Pillow
+certifi
