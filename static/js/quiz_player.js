@@ -53,6 +53,9 @@ if (player) {
     updateProgress();
   }
 
+  // --- Autosave: uses its own AbortController, 10s timeout, errors are non-fatal ---
+  let autosaveController = null;
+
   async function post(url, answers) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
@@ -64,6 +67,24 @@ if (player) {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to save. Please try again.');
+      return data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  // --- Final submission: dedicated fetch, longer timeout, never shared with autosave ---
+  async function submitPost(url, answers) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort('submission timeout'), 30000);
+    try {
+      const response = await fetch(url, {
+        method: 'POST', credentials: 'same-origin', signal: controller.signal,
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+        body: JSON.stringify({answers})
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Submission failed. Please try again.');
       return data;
     } finally {
       clearTimeout(timeout);
@@ -101,6 +122,8 @@ if (player) {
           errorBox.textContent = '';
         }
       } catch (error) {
+        // Silently ignore intentional autosave cancellations (AbortError).
+        if (error.name === 'AbortError') return;
         saveStatus.textContent = 'Not saved. Check your connection; keep this page open.';
         errorBox.textContent = 'Your current selections will be retried on the next answer change or submission.';
       } finally {
@@ -177,12 +200,18 @@ if (player) {
     submitButton.textContent = auto ? 'Time is up · Submitting…' : 'Submitting…';
     errorBox.textContent = '';
     try {
+      // Wait for any in-flight autosave to settle (it checks `submitting` so no new ones start).
       await saveChain;
       if (finished) return;
-      const data = await post(player.dataset.submitUrl, answers);
+      // Use the dedicated submitPost — separate controller, longer timeout.
+      const data = await submitPost(player.dataset.submitUrl, answers);
       goToResult(data.result_url);
     } catch (error) {
-      errorBox.textContent = `${error.message} Keep this page open. After the deadline, only previously saved answers count.`;
+      // Never surface raw AbortError ("signal is aborted without reason") to the student.
+      const message = (error.name === 'AbortError')
+        ? 'Submission timed out. Please try again.'
+        : error.message;
+      errorBox.textContent = `${message} Keep this page open. After the deadline, only previously saved answers count.`;
       retryAt = performance.now() + 5000;
       if (remaining() > 0) {
         form.querySelectorAll('input, button').forEach((input) => { input.disabled = false; });
