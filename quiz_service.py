@@ -4,6 +4,10 @@ import string
 import time
 import unicodedata
 import json
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 from db import get_db, get_next_sequence_value, to_dict, to_dict_list
 
@@ -66,18 +70,22 @@ def validate_quiz(data):
     pass_fail_enabled = bool(data.get('pass_fail_enabled'))
     randomize_questions = bool(data.get('randomize_questions'))
     randomize_options = bool(data.get('randomize_options'))
+    allow_review = bool(data.get('allow_review'))
 
     scheduled_start = None
     if data.get('scheduled_start'):
         try:
-            scheduled_start = int(time.mktime(time.strptime(data['scheduled_start'], "%Y-%m-%dT%H:%M")))
+            # Creator enters datetime-local in IST; parse as IST, store as UTC epoch
+            dt = datetime.strptime(data['scheduled_start'], "%Y-%m-%dT%H:%M")
+            scheduled_start = int(dt.replace(tzinfo=IST).timestamp())
         except ValueError:
             raise ValueError('Invalid start date format.')
 
     scheduled_end = None
     if data.get('scheduled_end'):
         try:
-            scheduled_end = int(time.mktime(time.strptime(data['scheduled_end'], "%Y-%m-%dT%H:%M")))
+            dt = datetime.strptime(data['scheduled_end'], "%Y-%m-%dT%H:%M")
+            scheduled_end = int(dt.replace(tzinfo=IST).timestamp())
         except ValueError:
             raise ValueError('Invalid end date format.')
             
@@ -101,11 +109,11 @@ def validate_quiz(data):
                 raise ValueError(f'Select one correct answer for question {index}.')
             validated.append({'text': text, 'options': options, 'correct_option': correct})
             
-    return title, description, instructions, minutes, pass_fail_enabled, pass_percentage, randomize_questions, randomize_options, scheduled_start, scheduled_end, bank_id, bank_question_count, validated
+    return title, description, instructions, minutes, pass_fail_enabled, pass_percentage, randomize_questions, randomize_options, allow_review, scheduled_start, scheduled_end, bank_id, bank_question_count, validated
 
 
 def save_quiz(creator_id, data, quiz_id=None):
-    title, description, instructions, minutes, pass_fail_enabled, pass_percentage, randomize_questions, randomize_options, scheduled_start, scheduled_end, bank_id, bank_question_count, questions = validate_quiz(data)
+    title, description, instructions, minutes, pass_fail_enabled, pass_percentage, randomize_questions, randomize_options, allow_review, scheduled_start, scheduled_end, bank_id, bank_question_count, questions = validate_quiz(data)
     db = get_db()
     
     if bank_id:
@@ -137,6 +145,7 @@ def save_quiz(creator_id, data, quiz_id=None):
             'pass_percentage': pass_percentage,
             'randomize_questions': randomize_questions,
             'randomize_options': randomize_options,
+            'allow_review': allow_review,
             'scheduled_start': scheduled_start,
             'scheduled_end': scheduled_end,
             'bank_id': bank_id,
@@ -153,7 +162,7 @@ def save_quiz(creator_id, data, quiz_id=None):
             'title': title, 'description': description, 'instructions': instructions,
             'time_limit': minutes, 'pass_fail_enabled': pass_fail_enabled,
             'pass_percentage': pass_percentage, 'randomize_questions': randomize_questions,
-            'randomize_options': randomize_options, 'scheduled_start': scheduled_start,
+            'randomize_options': randomize_options, 'allow_review': allow_review, 'scheduled_start': scheduled_start,
             'scheduled_end': scheduled_end, 'bank_id': bank_id, 'bank_question_count': bank_question_count
         }})
         db.questions.delete_many({'quiz_id': quiz_id})

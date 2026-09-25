@@ -17,9 +17,21 @@ if (player) {
   let saveRevision = 0;
   let unsavedChanges = false;
   let saveChain = Promise.resolve();
+  let isOnline = navigator.onLine;
   // Use elapsed monotonic time, not the student's wall clock.
   let clockAnchor = performance.now();
   let remainingAtAnchor = Number(player.dataset.deadline) - Number(player.dataset.serverNow);
+
+  // Connection status elements
+  const connectionStatus = document.getElementById('connection-status');
+  const deadlineWarning = document.getElementById('deadline-warning');
+  const timingCountdown = document.getElementById('timing-countdown');
+
+  // Dismiss restored notice after a few seconds
+  const restoredNotice = document.getElementById('restored-notice');
+  if (restoredNotice) {
+    setTimeout(() => { restoredNotice.style.display = 'none'; }, 5000);
+  }
 
   function remaining() {
     return Math.max(0, remainingAtAnchor - (performance.now() - clockAnchor) / 1000);
@@ -51,6 +63,62 @@ if (player) {
     document.getElementById('previous-question').disabled = current === 0;
     document.getElementById('next-question').disabled = current === panels.length - 1;
     updateProgress();
+  }
+
+  // --- Connection monitoring ---
+  function showConnectionStatus(type, message) {
+    if (!connectionStatus) return;
+    connectionStatus.style.display = 'block';
+    if (type === 'offline') {
+      connectionStatus.style.background = '#fff3e0';
+      connectionStatus.style.borderColor = '#ffcc80';
+      connectionStatus.style.color = '#e65100';
+      connectionStatus.style.border = '1px solid #ffcc80';
+    } else if (type === 'online') {
+      connectionStatus.style.background = '#e8f5e9';
+      connectionStatus.style.borderColor = '#a5d6a7';
+      connectionStatus.style.color = '#2e7d32';
+      connectionStatus.style.border = '1px solid #a5d6a7';
+    }
+    connectionStatus.textContent = message;
+  }
+
+  function hideConnectionStatus() {
+    if (connectionStatus) connectionStatus.style.display = 'none';
+  }
+
+  window.addEventListener('offline', () => {
+    isOnline = false;
+    showConnectionStatus('offline', '⚠ Connection interrupted — Your last saved answers are safe. We\'ll try to save your latest answer when the connection returns.');
+    saveStatus.textContent = '⚠ Offline — waiting to reconnect';
+  });
+
+  window.addEventListener('online', () => {
+    isOnline = true;
+    showConnectionStatus('online', '✓ Connection restored');
+    saveStatus.textContent = '✓ Connection restored';
+    queueSave();
+    setTimeout(hideConnectionStatus, 4000);
+  });
+
+  // --- Deadline warning ---
+  function updateDeadlineWarning(seconds) {
+    if (!deadlineWarning || finished) return;
+    if (seconds <= 0) {
+      deadlineWarning.style.display = 'block';
+      deadlineWarning.style.background = '#fce4ec';
+      deadlineWarning.style.borderColor = '#ef9a9a';
+      deadlineWarning.style.color = '#c62828';
+      deadlineWarning.textContent = '⏰ Quiz time has ended.';
+    } else if (seconds <= 60) {
+      deadlineWarning.style.display = 'block';
+      deadlineWarning.textContent = '⚠ Less than 1 minute remaining. Submit your quiz now.';
+    } else if (seconds <= 300) {
+      deadlineWarning.style.display = 'block';
+      deadlineWarning.textContent = '⚠ Less than 5 minutes remaining. Please complete and submit your quiz.';
+    } else {
+      deadlineWarning.style.display = 'none';
+    }
   }
 
   // --- Autosave: uses its own AbortController, 10s timeout, errors are non-fatal ---
@@ -93,6 +161,7 @@ if (player) {
 
   function goToResult(url) {
     finished = true;
+    if (deadlineWarning) deadlineWarning.style.display = 'none';
     window.location.replace(url);
   }
 
@@ -102,7 +171,7 @@ if (player) {
     const revision = ++saveRevision;
     unsavedChanges = true;
     pendingSaves++;
-    saveStatus.textContent = 'Saving answers…';
+    saveStatus.textContent = 'Saving...';
     // Keep one request in flight and skip superseded snapshots. Submission sends
     // the latest selections itself instead of waiting through a stale backlog.
     saveChain = saveChain.then(async () => {
@@ -118,13 +187,13 @@ if (player) {
         clockAnchor = performance.now();
         if (revision === saveRevision) {
           unsavedChanges = false;
-          saveStatus.textContent = 'All answers saved.';
+          saveStatus.textContent = '✓ Progress saved';
           errorBox.textContent = '';
         }
       } catch (error) {
         // Silently ignore intentional autosave cancellations (AbortError).
         if (error.name === 'AbortError') return;
-        saveStatus.textContent = 'Not saved. Check your connection; keep this page open.';
+        saveStatus.textContent = '⚠ Unable to save — checking connection...';
         errorBox.textContent = 'Your current selections will be retried on the next answer change or submission.';
       } finally {
         pendingSaves--;
@@ -209,8 +278,8 @@ if (player) {
     } catch (error) {
       // Never surface raw AbortError ("signal is aborted without reason") to the student.
       const message = (error.name === 'AbortError')
-        ? 'Submission timed out. Please try again.'
-        : error.message;
+        ? 'Submission timed out. Please check your connection and try again.'
+        : 'Submission failed. Please try again.';
       errorBox.textContent = `${message} Keep this page open. After the deadline, only previously saved answers count.`;
       retryAt = performance.now() + 5000;
       if (remaining() > 0) {
@@ -235,15 +304,29 @@ if (player) {
   document.getElementById('previous-question').addEventListener('click', () => showQuestion(current - 1));
   document.getElementById('next-question').addEventListener('click', () => showQuestion(current + 1));
   window.addEventListener('beforeunload', (event) => {
-    if (!finished && (unsavedChanges || pendingSaves > 0 || submitting)) {
+    if (!finished) {
       event.preventDefault();
       event.returnValue = '';
     }
   });
   function tick() {
     const seconds = Math.ceil(remaining());
-    document.getElementById('countdown').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    // Main countdown: show HH:MM:SS if >= 1 hour, else MM:SS
+    if (hours > 0) {
+      document.getElementById('countdown').textContent = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    } else {
+      document.getElementById('countdown').textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
     document.querySelector('.timer').classList.toggle('urgent', seconds <= 60);
+    // Update timing panel countdown
+    if (timingCountdown) {
+      timingCountdown.textContent = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    // Deadline warnings
+    updateDeadlineWarning(seconds);
     if (seconds <= 0 && performance.now() >= retryAt) submit(true);
   }
   showQuestion(0);

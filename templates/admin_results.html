@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block title %}All Results{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><span class="eyebrow">ADMIN WORKSPACE</span><h1>All Results</h1><p class="muted">Platform-wide student attempts.</p></div>
+</div>
+
+<form class="card" method="get" action="{{ url_for('admin_results') }}" style="margin-bottom: 24px;">
+  <div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end;">
+    <div style="flex: 1; min-width: 200px;">
+      <label>Search Student Name or Roll No.</label>
+      <input type="text" name="search" value="{{ request.args.get('search', '') }}" placeholder="E.g., John or 21CS01">
+    </div>
+    <div style="flex: 1; min-width: 200px;">
+      <label>Filter by Quiz</label>
+      <select name="quiz_id">
+        <option value="">All Quizzes</option>
+        {% for q in quizzes %}
+        <option value="{{ q.id }}" {% if request.args.get('quiz_id') == q.id|string %}selected{% endif %}>{{ q.title }} ({{ q.code }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div style="margin-bottom: 4px;">
+      <button class="button" type="submit">Filter</button>
+      <a class="button secondary" href="{{ url_for('admin_results') }}">Clear</a>
+    </div>
+  </div>
+</form>
+
+<div class="card" style="overflow-x: auto;">
+  <table class="leaderboard-table">
+    <thead>
+      <tr>
+        <th>Student Name</th>
+        <th>Roll No.</th>
+        <th>Quiz</th>
+        <th>Creator</th>
+        <th>Score</th>
+        <th>Percentage</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for result in results %}
+      <tr>
+        <td>{{ result.name }}</td>
+        <td>{{ result.roll_number }}</td>
+        <td>{{ result.quiz_name }}</td>
+        <td>{{ result.creator_name }}</td>
+        <td>{{ result.score if result.submitted_at else '-' }}</td>
+        <td>{{ result.percentage if result.submitted_at else '-' }}%</td>
+        <td>
+          {% if result.submitted_at %}
+            <span class="pill" style="background:var(--teal);color:white;border:none">Submitted</span>
+          {% else %}
+            <span class="pill">In Progress</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="7" style="text-align: center; color: var(--muted); padding: 24px;">No results found.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

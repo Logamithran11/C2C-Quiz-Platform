@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block title %}Admin Dashboard{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><span class="eyebrow">ADMIN WORKSPACE</span><h1>Admin Dashboard</h1><p class="muted">Platform-wide overview and analytics.</p></div>
+</div>
+
+<div class="stats">
+  <div class="stat"><strong>{{ summary.total_quizzes }}</strong><span>Total quizzes</span></div>
+  <div class="stat"><strong>{{ summary.total_creators }}</strong><span>Total creators</span></div>
+  <div class="stat"><strong>{{ summary.total_students }}</strong><span>Total students</span></div>
+  <div class="stat"><strong>{{ summary.total_attempts }}</strong><span>Total attempts</span></div>
+  <div class="stat"><strong>{{ summary.completed_attempts }}</strong><span>Completed attempts</span></div>
+  <div class="stat"><strong>{{ summary.active_quizzes }}</strong><span>Active quizzes</span></div>
+  <div class="stat"><strong>{{ summary.avg_score }}</strong><span>Avg score</span></div>
+  <div class="stat"><strong>{{ summary.avg_percent }}%</strong><span>Avg percentage</span></div>
+</div>
+
+<h2>All Quizzes</h2>
+<div class="quiz-grid">
+  {% for quiz in quizzes %}
+  <article class="card quiz-card">
+    <div class="spread">
+      <div><span class="pill">{{ quiz.code }}</span><span class="pill" style="margin-left: 4px;">{{ quiz.status }}</span></div>
+      <span class="muted">{{ quiz.created_at|ist }}</span>
+    </div>
+    <h3>{{ quiz.title }}</h3>
+    <p class="muted clamp">Created by: {{ quiz.creator_name }}</p>
+    <div class="quiz-meta">
+      <span>{{ quiz.participant_count }} attempts</span>
+      <span>{{ quiz.completed_count }} completed</span>
+      <span>{{ quiz.avg_percent }}% avg</span>
+    </div>
+    <div class="actions" style="margin-top: 16px;">
+      <a class="button small" href="{{ url_for('quiz_results', quiz_id=quiz.id) }}">View analytics</a>
+    </div>
+  </article>
+  {% else %}
+  <div class="card empty">
+    <span class="feature-icon">📊</span>
+    <h3>No quizzes found.</h3>
+    <p>Wait for creators to create their first quiz.</p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block title %}Manage Admins{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><span class="eyebrow">ADMIN WORKSPACE</span><h1>Manage Admins</h1><p class="muted">Add new administrators to the platform.</p></div>
+</div>
+
+<div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
+  <form class="card stack" method="post" action="{{ url_for('admin_manage') }}" style="flex: 1; min-width: 300px; max-width: 400px;">
+    <h2>Add New Admin</h2>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div><label>Name<input type="text" name="name" required></label></div>
+    <div><label>Email<input type="email" name="email" required></label></div>
+    <div><label>Password<input type="password" name="password" required minlength="8"></label></div>
+    <div><label>Confirm Password<input type="password" name="confirm_password" required minlength="8"></label></div>
+    <div class="actions"><button class="button" type="submit" style="width: 100%;">Create Admin</button></div>
+  </form>
+
+  <div class="card" style="flex: 2; min-width: 300px;">
+    <h2>Existing Admins</h2>
+    <div style="margin-top: 16px; overflow-x: auto;">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Created At</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for admin in admins %}
+          <tr>
+            <td>{{ admin.name }}</td>
+            <td>{{ admin.email }}</td>
+            <td>{{ admin.created_at|ist }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

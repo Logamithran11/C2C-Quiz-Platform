@@ -177,6 +177,7 @@ document.addEventListener('DOMContentLoaded', function() {
       pass_percentage: document.getElementById('pass-percentage').value,
       randomize_questions: document.getElementById('randomize-questions').checked,
       randomize_options: document.getElementById('randomize-options').checked,
+      allow_review: document.getElementById('allow-review') ? document.getElementById('allow-review').checked : false,
       scheduled_start: document.getElementById('scheduled-start').value,
       scheduled_end: document.getElementById('scheduled-end').value,
       bank_id: isBank ? bankIdSelect.value : null,

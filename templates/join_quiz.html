@@ -1,3 +1,152 @@
 {% extends 'base.html' %}
 {% block title %}Join a quiz{% endblock %}
-{% block content %}<section class="auth-layout"><div class="auth-intro"><span class="eyebrow">READY WHEN YOU ARE</span><h1>Step into your<br>next challenge.</h1><p>No account needed. Enter your details and focus on what you know.</p>{% if quiz %}<div class="card"><h2>{{ quiz.title }}</h2><p>{{ quiz.description }}</p>{% if quiz.instructions %}<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);"><strong style="display:block;margin-bottom:8px;">Instructions:</strong><p style="white-space:pre-wrap;font-size:0.9rem;color:var(--text);">{{ quiz.instructions }}</p></div>{% endif %}<div class="quiz-meta"><span>{{ quiz.question_count }} questions</span><span>{{ quiz.time_limit }} minutes</span></div></div>{% endif %}</div><div class="card auth-card"><h2>Join a quiz</h2><form method="post" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Quiz code<input name="code" value="{{ code }}" maxlength="10" minlength="10" required autocapitalize="characters" spellcheck="false" {% if quiz %}readonly{% endif %} placeholder="Enter your 10-character code"></label><label>Your name<input name="name" maxlength="100" autocomplete="name" required></label><label>Roll number<input name="roll_number" maxlength="50" required spellcheck="false" placeholder="e.g. CS2026001"></label><div class="notice"><strong>Before you start</strong><p>The timer begins when you press Start. You get one attempt per roll number. Keep this browser session to resume after refreshing.</p></div><button class="button" type="submit">Start / resume quiz →</button></form></div></section>{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="auth-intro">
+    <span class="eyebrow">READY WHEN YOU ARE</span>
+    <h1>Step into your<br>next challenge.</h1>
+    <p>No account needed. Enter your details and focus on what you know.</p>
+    {% if quiz %}
+    <div class="card">
+      <h2>{{ quiz.title }}</h2>
+      <p>{{ quiz.description }}</p>
+      {% if quiz.instructions %}
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+        <strong style="display:block;margin-bottom:8px;">Instructions:</strong>
+        <p style="white-space:pre-wrap;font-size:0.9rem;color:var(--text);">{{ quiz.instructions }}</p>
+      </div>
+      {% endif %}
+      <div class="quiz-meta">
+        <span>{{ quiz.question_count }} questions</span>
+        <span>{{ quiz.time_limit }} minutes</span>
+      </div>
+      {% if schedule_info.get('start_ist') or schedule_info.get('end_ist') %}
+      <div style="margin-top:12px;padding:12px 16px;background:var(--surface);border-radius:8px;border:1px solid var(--border);">
+        <div style="font-size:0.85rem;color:var(--muted);">
+          <strong style="display:block;margin-bottom:6px;color:var(--text);font-size:0.9rem;">⏱ Quiz Schedule</strong>
+          {% if schedule_info.get('start_ist') %}
+          <div style="margin-bottom:4px;">Start: <strong>{{ schedule_info.start_ist }} IST</strong></div>
+          {% endif %}
+          {% if schedule_info.get('end_ist') %}
+          <div>End: <strong>{{ schedule_info.end_ist }} IST</strong></div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+      {% if schedule_info.get('status') == 'before_start' %}
+      <div style="margin-top:12px;padding:12px 16px;background:#fff8e1;border-radius:8px;border:1px solid #ffe082;">
+        <p style="margin:0;font-size:0.9rem;color:#f57f17;">⏳ This quiz has not started yet.{% if schedule_info.get('start_ist') %} Quiz starts at: <strong>{{ schedule_info.start_ist }} IST</strong>{% endif %}</p>
+      </div>
+      {% elif schedule_info.get('status') == 'after_end' %}
+      <div style="margin-top:12px;padding:12px 16px;background:#fce4ec;border-radius:8px;border:1px solid #ef9a9a;">
+        <p style="margin:0;font-size:0.9rem;color:#c62828;">⏰ This quiz has already ended.</p>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="card auth-card">
+    <h2>Join a quiz</h2>
+    <form method="post" class="stack" id="join-quiz-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Quiz code
+        <input name="code" value="{{ code }}" maxlength="10" minlength="10" required autocapitalize="characters" spellcheck="false" {% if quiz %}readonly{% endif %} placeholder="Enter your 10-character code">
+      </label>
+      <label>Your name
+        <input name="name" maxlength="100" autocomplete="name" required>
+      </label>
+      <label>Roll number
+        <input name="roll_number" maxlength="50" required spellcheck="false" placeholder="e.g. CS2026001">
+      </label>
+      <button class="button" type="submit">Start / resume quiz &rarr;</button>
+    </form>
+  </div>
+</section>
+
+<!-- Start Confirmation Modal -->
+<div id="start-quiz-modal" class="modal-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="modal-title">
+  <div class="card modal-card" style="max-width: 420px; text-align: left; padding: 32px 24px;">
+    <h2 id="modal-title" style="color: var(--navy); margin-bottom: 8px; font-size: 1.4rem;">Before you begin</h2>
+    <p style="color: var(--muted); font-size: 0.95rem; margin-bottom: 24px;">A few things to know before starting.</p>
+    
+    <div style="font-size: 0.95rem; line-height: 1.5; color: var(--text);">
+      <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 16px;">
+        <li style="display: flex; gap: 12px; align-items: flex-start;"><span style="color: var(--primary); font-weight: bold;">✓</span> <span>Your answers are saved automatically as you progress.</span></li>
+        <li style="display: flex; gap: 12px; align-items: flex-start;"><span style="color: var(--primary); font-weight: bold;">✓</span> <span>Saved answers can be restored after a refresh or temporary connection loss.</span></li>
+        <li style="display: flex; gap: 12px; align-items: flex-start;"><span style="color: var(--primary); font-weight: bold;">✓</span> <span>Keep this page open and avoid the browser Back button during the quiz.</span></li>
+        <li style="display: flex; gap: 12px; align-items: flex-start;"><span style="color: var(--primary); font-weight: bold;">✓</span> <span>Submit before the deadline. Submitted answers cannot be changed.</span></li>
+        <li style="display: flex; gap: 12px; align-items: flex-start;"><span style="color: var(--primary); font-weight: bold;">✓</span> <span>If you leave or close the quiz, your progress may be saved. Return as soon as possible.</span></li>
+      </ul>
+    </div>
+
+    <label style="display: flex; align-items: center; gap: 10px; margin-top: 32px; font-weight: 500; cursor: pointer;">
+      <input type="checkbox" id="read-instructions-check" style="width: 18px; height: 18px; margin: 0;">
+      I have read and understood the instructions.
+    </label>
+
+    <p id="modal-validation-msg" class="error-text" style="display: none; margin-top: 8px; font-size: 0.85rem;">Please confirm that you have read and understood the instructions.</p>
+
+    <div class="spread" style="margin-top: 24px;">
+      <button type="button" class="button ghost" id="cancel-start-btn">Cancel</button>
+      <button type="button" class="button" id="confirm-start-btn" disabled>Start Quiz &rarr;</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const form = document.getElementById('join-quiz-form');
+  const modal = document.getElementById('start-quiz-modal');
+  const checkbox = document.getElementById('read-instructions-check');
+  const confirmBtn = document.getElementById('confirm-start-btn');
+  const cancelBtn = document.getElementById('cancel-start-btn');
+  const validationMsg = document.getElementById('modal-validation-msg');
+  
+  if (form) {
+    form.addEventListener('submit', (e) => {
+      if (!modal.dataset.confirmed) {
+        e.preventDefault();
+        modal.hidden = false;
+        checkbox.checked = false;
+        confirmBtn.disabled = true;
+        validationMsg.style.display = 'none';
+        
+        // Keep focus inside the modal
+        checkbox.focus();
+      }
+    });
+  }
+
+  if (checkbox) {
+    checkbox.addEventListener('change', () => {
+      confirmBtn.disabled = !checkbox.checked;
+      if (checkbox.checked) {
+        validationMsg.style.display = 'none';
+      }
+    });
+  }
+
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', () => {
+      if (!checkbox.checked) {
+        validationMsg.style.display = 'block';
+        return;
+      }
+      modal.hidden = true;
+      modal.dataset.confirmed = 'true';
+      form.submit();
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      modal.hidden = true;
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.hidden) {
+      modal.hidden = true;
+    }
+  });
+</script>
+{% endblock %}

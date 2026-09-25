@@ -45,6 +45,7 @@
   <div class="setting-group"><label>Pass Percentage (%)<input type="number" id="pass-percentage" min="1" max="100" step="1" value="{{ quiz.pass_percentage if quiz else 50 }}" style="width:100px"></label></div>
   <div class="setting-group"><label class="setting-label"><input type="checkbox" id="randomize-questions" {% if quiz and quiz.randomize_questions %}checked{% endif %}> Randomize question order</label></div>
   <div class="setting-group"><label class="setting-label"><input type="checkbox" id="randomize-options" {% if quiz and quiz.randomize_options %}checked{% endif %}> Randomize answer options</label></div>
+  <div class="setting-group"><label class="setting-label"><input type="checkbox" id="allow-review" {% if quiz and quiz.allow_review %}checked{% endif %}> Allow students to view correct answers after submission</label></div>
   <div class="setting-group"><label>Start Date/Time<input type="datetime-local" id="scheduled-start" value="{{ quiz.scheduled_start_iso if quiz and quiz.scheduled_start else '' }}"></label></div>
   <div class="setting-group"><label>End Date/Time<input type="datetime-local" id="scheduled-end" value="{{ quiz.scheduled_end_iso if quiz and quiz.scheduled_end else '' }}"></label></div>
 </div>

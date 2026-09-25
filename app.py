@@ -97,10 +97,23 @@ def create_app(test_config=None):
             return view(*args, **kwargs)
         return wrapped
 
+    def admin_required(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if g.creator is None or g.creator.get('role') != 'admin':
+                abort(403, description='Administrator privileges required.')
+            return view(*args, **kwargs)
+        return wrapped
+
     def owned_quiz(quiz_id):
         if not 1 <= quiz_id <= 2 ** 63 - 1:
             abort(404, description='Quiz not found.')
-        quiz = to_dict(get_db().quizzes.find_one({'_id': quiz_id, 'creator_id': g.creator['id']}))
+            
+        query = {'_id': quiz_id}
+        if g.creator.get('role') != 'admin':
+            query['creator_id'] = g.creator['id']
+            
+        quiz = to_dict(get_db().quizzes.find_one(query))
         if quiz is None:
             abort(404, description='Quiz not found.')
         quiz['question_count'] = get_db().questions.count_documents({'quiz_id': quiz_id})
@@ -144,6 +157,7 @@ def create_app(test_config=None):
                     'name': name,
                     'email': email,
                     'password_hash': generate_password_hash(password),
+                    'role': 'creator',
                     'created_at': now()
                 })
             except DuplicateKeyError:
@@ -217,10 +231,12 @@ def create_app(test_config=None):
     @login_required
     def edit_quiz(quiz_id):
         quiz = dict(owned_quiz(quiz_id))
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
         if quiz.get('scheduled_start'):
-            quiz['scheduled_start_iso'] = datetime.fromtimestamp(quiz['scheduled_start']).strftime("%Y-%m-%dT%H:%M")
+            quiz['scheduled_start_iso'] = datetime.fromtimestamp(quiz['scheduled_start'], IST).strftime("%Y-%m-%dT%H:%M")
         if quiz.get('scheduled_end'):
-            quiz['scheduled_end_iso'] = datetime.fromtimestamp(quiz['scheduled_end']).strftime("%Y-%m-%dT%H:%M")
+            quiz['scheduled_end_iso'] = datetime.fromtimestamp(quiz['scheduled_end'], IST).strftime("%Y-%m-%dT%H:%M")
         
         db = get_db()
         if db.attempts.find_one({'quiz_id': quiz_id}):
@@ -354,11 +370,26 @@ def create_app(test_config=None):
         code = (code or request.values.get('code', '')).strip().upper()
         quiz = None
         db = get_db()
+        schedule_info = {}
         if code:
             quiz = to_dict(db.quizzes.find_one({'code': code}))
             if quiz is None:
                 raise ValueError('Quiz code not found. Check the code with your creator.')
             quiz['question_count'] = db.questions.count_documents({'quiz_id': quiz['id']})
+            # Compute schedule info for display
+            from zoneinfo import ZoneInfo
+            IST = ZoneInfo("Asia/Kolkata")
+            current = now()
+            if quiz.get('scheduled_start'):
+                schedule_info['start_ist'] = datetime.fromtimestamp(quiz['scheduled_start'], IST).strftime('%d %b %Y, %I:%M %p')
+                if current < quiz['scheduled_start']:
+                    schedule_info['status'] = 'before_start'
+            if quiz.get('scheduled_end'):
+                schedule_info['end_ist'] = datetime.fromtimestamp(quiz['scheduled_end'], IST).strftime('%d %b %Y, %I:%M %p')
+                if current > quiz['scheduled_end']:
+                    schedule_info['status'] = 'after_end'
+            if not schedule_info.get('status'):
+                schedule_info['status'] = 'active'
             
         if request.method == 'POST':
             if quiz is None:
@@ -368,7 +399,7 @@ def create_app(test_config=None):
             attempt_id = start_attempt(quiz, request.form.get('name', ''), request.form.get('roll_number', ''),
                                        session['student_token'])
             return redirect(url_for('take_quiz', attempt_id=attempt_id))
-        return render_template('join_quiz.html', quiz=quiz, code=code)
+        return render_template('join_quiz.html', quiz=quiz, code=code, schedule_info=schedule_info)
 
     @app.get('/attempts/<int:attempt_id>')
     def take_quiz(attempt_id):
@@ -406,8 +437,21 @@ def create_app(test_config=None):
         answers_cursor = db.answers.find({'attempt_id': attempt_id})
         saved = {str(row['question_id']): row['selected_option'] for row in answers_cursor}
         
+        # Compute IST schedule times for the timing panel
+        from zoneinfo import ZoneInfo
+        IST_tz = ZoneInfo("Asia/Kolkata")
+        schedule_display = {}
+        if quiz.get('scheduled_start'):
+            schedule_display['start_ist'] = datetime.fromtimestamp(quiz['scheduled_start'], IST_tz).strftime('%d %b %Y, %I:%M %p')
+        if quiz.get('scheduled_end'):
+            schedule_display['end_ist'] = datetime.fromtimestamp(quiz['scheduled_end'], IST_tz).strftime('%d %b %Y, %I:%M %p')
+        
+        # Check if student has saved answers (for restored answers notice)
+        has_saved_answers = len(saved) > 0
+        
         return render_template('take_quiz.html', quiz=quiz, attempt=attempt, questions=questions,
-                               saved=saved, server_now=now())
+                               saved=saved, server_now=now(), schedule_display=schedule_display,
+                               has_saved_answers=has_saved_answers)
 
     @app.post('/attempts/<int:attempt_id>/save')
     def save_answers(attempt_id):
@@ -436,6 +480,67 @@ def create_app(test_config=None):
             return redirect(url_for('take_quiz', attempt_id=attempt_id))
         quiz = to_dict(get_db().quizzes.find_one({'_id': attempt['quiz_id']}))
         return render_template('result.html', result=attempt, quiz=quiz)
+
+    @app.get('/attempts/<int:attempt_id>/answers')
+    def view_answers(attempt_id):
+        student_attempt(attempt_id)
+        attempt = process_attempt(attempt_id)
+        if attempt.get('submitted_at') is None:
+            abort(403, "Quiz not submitted yet.")
+        db = get_db()
+        quiz = to_dict(db.quizzes.find_one({'_id': attempt['quiz_id']}))
+        if not quiz.get('allow_review', False):
+            abort(403, "Answer review is not allowed for this quiz.")
+            
+        q_cursor = db.questions.find({'quiz_id': quiz['id']}).sort('position', 1)
+        questions = to_dict_list(q_cursor)
+        
+        if attempt.get('question_order'):
+            order_data = json.loads(attempt['question_order'])
+            q_order = order_data.get('questions')
+            o_map = order_data.get('options', {})
+            
+            if q_order:
+                q_dict = {q['id']: dict(q) for q in questions}
+                questions = [q_dict[q_id] for q_id in q_order if q_id in q_dict]
+            else:
+                questions = [dict(q) for q in questions]
+                
+            if o_map:
+                for q in questions:
+                    qid_str = str(q['id'])
+                    if qid_str in o_map:
+                        q['option_order'] = o_map[qid_str]
+        else:
+            questions = [dict(q) for q in questions]
+
+        answers_cursor = db.answers.find({'attempt_id': attempt_id})
+        saved = {str(row['question_id']): row['selected_option'] for row in answers_cursor}
+        
+        q_stats = {}
+        all_attempts = to_dict_list(db.attempts.find({'quiz_id': quiz['id'], 'submitted_at': {'$ne': None}}))
+        if all_attempts:
+            submitted_attempt_ids = [a['id'] for a in all_attempts]
+            all_answers = to_dict_list(db.answers.find({
+                'attempt_id': {'$in': submitted_attempt_ids},
+                'quiz_id': quiz['id']
+            }))
+            
+            for q in questions:
+                q_id = q['id']
+                q_answers = [a for a in all_answers if a['question_id'] == q_id]
+                answered_count = len(q_answers)
+                correct_count = sum(1 for a in q_answers if a.get('selected_option') == q['correct_option'])
+                
+                accuracy = round((correct_count / answered_count) * 100, 1) if answered_count > 0 else 0
+                difficulty = 'Hard' if accuracy < 40 else ('Medium' if accuracy <= 75 else 'Easy')
+                
+                q_stats[q_id] = {
+                    'accuracy': accuracy,
+                    'difficulty': difficulty
+                }
+        
+        return render_template('view_answers.html', quiz=quiz, attempt=attempt, questions=questions, saved=saved, q_stats=q_stats)
 
     @app.get('/quizzes/<int:quiz_id>/results')
     @login_required
@@ -471,11 +576,21 @@ def create_app(test_config=None):
                 answered_count = len(q_answers)
                 correct_count = sum(1 for a in q_answers if a.get('selected_option') == q['correct_option'])
                 
+                incorrect_count = answered_count - correct_count
+                unanswered_count = len(results) - answered_count
+                accuracy = round((correct_count / answered_count) * 100, 1) if answered_count > 0 else 0
+                difficulty = 'Hard' if accuracy < 40 else ('Medium' if accuracy <= 75 else 'Easy')
+                
                 q_stats.append({
                     'position': q['position'],
                     'text': q['text'],
+                    'total': len(results),
                     'answered': answered_count,
-                    'correct': correct_count
+                    'correct': correct_count,
+                    'incorrect': incorrect_count,
+                    'unanswered': unanswered_count,
+                    'accuracy': accuracy,
+                    'difficulty': difficulty
                 })
             
             analytics = {
@@ -630,5 +745,133 @@ def create_app(test_config=None):
         
         flash('Quiz deleted successfully.', 'success')
         return redirect(url_for('dashboard'))
+
+    @app.get('/admin')
+    @admin_required
+    def admin_dashboard():
+        db = get_db()
+        
+        total_quizzes = db.quizzes.count_documents({})
+        total_creators = db.creators.count_documents({'role': {'$ne': 'admin'}})
+        total_students = len(db.attempts.distinct('normalized_roll'))
+        total_attempts = db.attempts.count_documents({})
+        completed_attempts = db.attempts.count_documents({'submitted_at': {'$ne': None}})
+        
+        current_time = now()
+        active_quizzes = db.quizzes.count_documents({
+            '$or': [
+                {'scheduled_end': {'$gt': current_time}, 'scheduled_start': {'$lte': current_time}},
+                {'scheduled_start': None, 'scheduled_end': None}
+            ]
+        })
+        
+        pipeline = [
+            {'$match': {'submitted_at': {'$ne': None}}},
+            {'$group': {'_id': None, 'avg_score': {'$avg': '$score'}, 'avg_percent': {'$avg': '$percentage'}}}
+        ]
+        agg = list(db.attempts.aggregate(pipeline))
+        avg_score = round(agg[0].get('avg_score') or 0, 1) if agg else 0
+        avg_percent = round(agg[0].get('avg_percent') or 0, 1) if agg else 0
+        
+        quizzes = to_dict_list(db.quizzes.find().sort([('created_at', -1), ('_id', -1)]))
+        creators = {c['_id']: c['name'] for c in db.creators.find()}
+        
+        for q in quizzes:
+            q['creator_name'] = creators.get(q['creator_id'], 'Unknown')
+            q['participant_count'] = db.attempts.count_documents({'quiz_id': q['id']})
+            q['completed_count'] = db.attempts.count_documents({'quiz_id': q['id'], 'submitted_at': {'$ne': None}})
+            
+            q_agg = list(db.attempts.aggregate([
+                {'$match': {'quiz_id': q['id'], 'submitted_at': {'$ne': None}}},
+                {'$group': {'_id': None, 'avg_score': {'$avg': '$score'}, 'avg_percent': {'$avg': '$percentage'}}}
+            ]))
+            q['avg_score'] = round(q_agg[0]['avg_score'], 1) if q_agg else 0
+            q['avg_percent'] = round(q_agg[0]['avg_percent'], 1) if q_agg else 0
+            
+            status = 'LIVE'
+            if q.get('scheduled_start') and current_time < q['scheduled_start']:
+                status = 'SCHEDULED'
+            elif q.get('scheduled_end') and current_time > q['scheduled_end']:
+                status = 'ENDED'
+            elif q['participant_count'] == 0 and not q.get('scheduled_start') and not q.get('scheduled_end'):
+                status = 'DRAFT'
+            q['status'] = status
+            
+        summary = {
+            'total_quizzes': total_quizzes,
+            'total_creators': total_creators,
+            'total_students': total_students,
+            'total_attempts': total_attempts,
+            'completed_attempts': completed_attempts,
+            'active_quizzes': active_quizzes,
+            'avg_score': avg_score,
+            'avg_percent': avg_percent
+        }
+        
+        return render_template('admin_dashboard.html', summary=summary, quizzes=quizzes)
+
+    @app.get('/admin/results')
+    @admin_required
+    def admin_results():
+        db = get_db()
+        search = request.args.get('search', '').strip()
+        quiz_id_filter = request.args.get('quiz_id', '')
+        
+        query = {}
+        if search:
+            query['$or'] = [
+                {'name': {'$regex': search, '$options': 'i'}},
+                {'roll_number': {'$regex': search, '$options': 'i'}}
+            ]
+        if quiz_id_filter:
+            try:
+                query['quiz_id'] = int(quiz_id_filter)
+            except ValueError:
+                pass
+                
+        results_cursor = db.attempts.find(query).sort('started_at', -1).limit(1000)
+        results = to_dict_list(results_cursor)
+        
+        quiz_dict = {q['_id']: q for q in db.quizzes.find()}
+        creator_dict = {c['_id']: c['name'] for c in db.creators.find()}
+        
+        for r in results:
+            quiz = quiz_dict.get(r['quiz_id'], {})
+            r['quiz_name'] = quiz.get('title', 'Unknown Quiz')
+            r['creator_name'] = creator_dict.get(quiz.get('creator_id'), 'Unknown')
+            
+        return render_template('admin_results.html', results=results, quizzes=quiz_dict.values())
+
+    @app.route('/admin/manage', methods=['GET', 'POST'])
+    @admin_required
+    def admin_manage():
+        db = get_db()
+        if request.method == 'POST':
+            name = clean_text(request.form.get('name', ''), 'Name', 100)
+            email = clean_text(request.form.get('email', ''), 'Email', 254).casefold()
+            password = request.form.get('password', '')
+            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
+                raise ValueError('Enter a valid email address.')
+            if not 8 <= len(password) <= 128:
+                raise ValueError('Password must contain 8 to 128 characters.')
+            if password != request.form.get('confirm_password'):
+                raise ValueError('Passwords do not match.')
+            try:
+                creator_id = get_next_sequence_value('creators')
+                db.creators.insert_one({
+                    '_id': creator_id,
+                    'name': name,
+                    'email': email,
+                    'password_hash': generate_password_hash(password),
+                    'role': 'admin',
+                    'created_at': now()
+                })
+            except DuplicateKeyError:
+                raise ValueError('An account with that email already exists.')
+            flash('Admin account created successfully.', 'success')
+            return redirect(url_for('admin_manage'))
+            
+        admins = to_dict_list(db.creators.find({'role': 'admin'}).sort('created_at', -1))
+        return render_template('admin_manage.html', admins=admins)
 
     return app

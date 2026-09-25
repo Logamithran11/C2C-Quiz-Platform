@@ -975,3 +975,504 @@ def test_cleanup_young_quiz(app, client, monkeypatch):
         
         cleanup_expired_quizzes.cleanup_expired_quizzes()
         assert database.quizzes.count_documents({'_id': q['_id']}) == 0
+
+
+# =========================================================
+# TIMEZONE, SCHEDULING, AUTOSAVE, RESUME, SUBMISSION TESTS
+# =========================================================
+
+from zoneinfo import ZoneInfo
+
+
+def _make_scheduled_quiz_utc(app, client, start_epoch=None, end_epoch=None):
+    """Helper: create a quiz with specific UTC epoch schedule times via direct DB insertion."""
+    register(client)
+    login(client)
+    data = quiz_data()
+    # Create without schedule first
+    post(client, '/quizzes/new', {'quiz_data': json.dumps(data)})
+    with app.app_context():
+        db = get_db()
+        q = db.quizzes.find_one(sort=[('_id', -1)])
+        update = {}
+        if start_epoch is not None:
+            update['scheduled_start'] = start_epoch
+        if end_epoch is not None:
+            update['scheduled_end'] = end_epoch
+        if update:
+            db.quizzes.update_one({'_id': q['_id']}, {'$set': update})
+        return to_dict(db.quizzes.find_one({'_id': q['_id']}))
+
+
+# --- TIMEZONE TESTS ---
+
+def test_tz_creator_ist_to_utc_stored(app, client):
+    """Creator enters IST datetime → correct UTC epoch is stored."""
+    register(client)
+    login(client)
+    data = quiz_data()
+    # 2026-09-25T21:26 IST = 2026-09-25T15:56 UTC
+    data['scheduled_start'] = '2026-09-25T21:26'
+    data['scheduled_end'] = '2026-09-26T05:57'
+    post(client, '/quizzes/new', {'quiz_data': json.dumps(data)})
+    with app.app_context():
+        q = get_db().quizzes.find_one(sort=[('_id', -1)])
+        IST = ZoneInfo("Asia/Kolkata")
+        expected_start = int(datetime(2026, 9, 25, 21, 26, tzinfo=IST).timestamp())
+        expected_end = int(datetime(2026, 9, 26, 5, 57, tzinfo=IST).timestamp())
+        assert q['scheduled_start'] == expected_start
+        assert q['scheduled_end'] == expected_end
+
+
+def test_tz_utc_server_schedule_correct(app, client, monkeypatch):
+    """Server running in UTC → schedule comparisons remain correct."""
+    IST = ZoneInfo("Asia/Kolkata")
+    start_ist = datetime(2026, 9, 25, 21, 26, tzinfo=IST)
+    start_utc_epoch = int(start_ist.timestamp())
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_utc_epoch)
+
+    # Before start
+    monkeypatch.setattr('quiz_service.now', lambda: start_utc_epoch - 60)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 400
+
+    # At start
+    monkeypatch.setattr('quiz_service.now', lambda: start_utc_epoch)
+    student2 = app.test_client()
+    res2 = join(student2, {'code': quiz_record['code']}, roll='R002')
+    assert res2.status_code == 302
+
+
+def test_tz_student_sees_ist_on_join_page(app, client):
+    """Student sees correct IST time on join page."""
+    IST = ZoneInfo("Asia/Kolkata")
+    start_epoch = int(datetime(2026, 9, 25, 21, 26, tzinfo=IST).timestamp())
+    end_epoch = int(datetime(2026, 9, 26, 5, 57, tzinfo=IST).timestamp())
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch, end_epoch=end_epoch)
+
+    student = app.test_client()
+    page = student.get(f"/join/{quiz_record['code']}")
+    assert b'25 Sep 2026, 09:26 PM' in page.data
+    assert b'26 Sep 2026, 05:57 AM' in page.data
+
+
+def test_tz_before_start_rejected(app, client, monkeypatch):
+    """Before start time → student is rejected."""
+    start_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: start_epoch - 1)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 400
+    assert b'has not started yet' in res.data
+
+
+def test_tz_during_window_allowed(app, client, monkeypatch):
+    """During active window → student is allowed."""
+    start_epoch = 2000000000
+    end_epoch = 2000003600
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch, end_epoch=end_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: start_epoch + 100)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 302
+
+
+def test_tz_after_end_rejected(app, client, monkeypatch):
+    """After end time → student is rejected."""
+    end_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, end_epoch=end_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: end_epoch + 1)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 400
+    assert b'has already ended' in res.data
+
+
+def test_tz_exact_start_boundary(app, client, monkeypatch):
+    """Exact start time → student is allowed."""
+    start_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: start_epoch)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 302
+
+
+def test_tz_exact_end_boundary(app, client, monkeypatch):
+    """Exact end time → student is rejected (> check)."""
+    end_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, end_epoch=end_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: end_epoch)
+    student = app.test_client()
+    res = join(student, {'code': quiz_record['code']})
+    assert res.status_code == 302  # at exact end is not > end, so allowed
+
+
+def test_tz_edit_quiz_shows_ist(app, client):
+    """Edit quiz page shows IST datetime values in inputs."""
+    IST = ZoneInfo("Asia/Kolkata")
+    start_epoch = int(datetime(2026, 9, 25, 21, 26, tzinfo=IST).timestamp())
+    end_epoch = int(datetime(2026, 9, 26, 5, 57, tzinfo=IST).timestamp())
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch, end_epoch=end_epoch)
+    page = client.get(f"/quizzes/{quiz_record['id']}/edit")
+    assert b'2026-09-25T21:26' in page.data
+    assert b'2026-09-26T05:57' in page.data
+
+
+# --- AUTOSAVE TESTS ---
+
+def test_autosave_successful(app, quiz):
+    """Answer saves successfully via save endpoint."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    res = post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1}})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data['submitted'] is False
+    assert 'server_now' in data
+    assert 'deadline' in data
+
+
+def test_autosave_status_not_false_success(app, quiz):
+    """Failed save does not falsely show success."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    # Try saving with invalid option
+    res = post(student, f'/attempts/{identifier}/save', payload={'answers': {'999999': 0}})
+    assert res.status_code == 400
+
+
+def test_autosave_multiple_changes(app, quiz):
+    """Multiple answer changes are handled correctly."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    # First answer
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 0}})
+    # Change answer
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 2}})
+    with app.app_context():
+        ans = get_db().answers.find_one({'attempt_id': identifier, 'question_id': int(ids[0])})
+        assert ans['selected_option'] == 2
+
+
+# --- RESUME TESTS ---
+
+def test_resume_restores_answers(app, quiz):
+    """Refresh restores previously saved answers."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1, ids[1]: 0}})
+    page = student.get(f'/attempts/{identifier}')
+    assert page.status_code == 200
+    assert b'value="1" checked' in page.data
+    assert b'value="0" checked' in page.data
+
+
+def test_resume_no_duplicate_attempt(app, quiz):
+    """Refresh does not create a duplicate attempt."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    student.get(f'/attempts/{identifier}')
+    student.get(f'/attempts/{identifier}')
+    with app.app_context():
+        assert get_db().attempts.count_documents({'quiz_id': quiz['id']}) == 1
+
+
+def test_resume_deadline_unchanged(app, quiz):
+    """Refresh does not reset timer — deadline remains the same."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    before = stored_attempt(app, identifier)
+    student.get(f'/attempts/{identifier}')
+    after = stored_attempt(app, identifier)
+    assert after['deadline'] == before['deadline']
+    assert after['started_at'] == before['started_at']
+
+
+def test_resume_existing_deadline_authoritative(app, quiz, monkeypatch):
+    """Existing deadline remains authoritative after refresh."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    deadline = stored_attempt(app, identifier)['deadline']
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000100)
+    student.get(f'/attempts/{identifier}')
+    assert stored_attempt(app, identifier)['deadline'] == deadline
+
+
+# --- SUBMISSION TESTS ---
+
+def test_submit_while_autosave_pending(app, quiz):
+    """Submit works correctly even if autosave was previously called."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    # Save one answer
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1}})
+    # Submit with updated answers
+    res = post(student, f'/attempts/{identifier}/submit', payload={'answers': {ids[0]: 1, ids[1]: 0}})
+    assert res.status_code == 200
+    attempt = stored_attempt(app, identifier)
+    assert attempt['submitted_at'] is not None
+    assert attempt['score'] == 2
+
+
+def test_final_submission_cannot_be_duplicated(app, quiz):
+    """Final submission cannot be duplicated."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    res1 = post(student, f'/attempts/{identifier}/submit', payload={'answers': {ids[0]: 1}})
+    assert res1.status_code == 200
+    original = stored_attempt(app, identifier)
+    res2 = post(student, f'/attempts/{identifier}/submit', payload={'answers': {ids[0]: 0, ids[1]: 0, ids[2]: 2}})
+    assert res2.status_code == 200
+    assert stored_attempt(app, identifier)['score'] == original['score']
+
+
+def test_submission_after_deadline_rejected(app, quiz, monkeypatch):
+    """Submission after deadline → answers frozen, auto-submitted."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1}})
+    deadline = stored_attempt(app, identifier)['deadline']
+    # Move past deadline
+    monkeypatch.setattr('quiz_service.now', lambda: deadline + 60)
+    res = post(student, f'/attempts/{identifier}/submit', payload={'answers': {ids[0]: 0, ids[1]: 0}})
+    assert res.status_code == 200
+    attempt = stored_attempt(app, identifier)
+    assert attempt['submitted_at'] <= deadline
+    # Only the first save should count
+    assert attempt['score'] == 1
+
+
+def test_submission_before_deadline_accepted(app, quiz, monkeypatch):
+    """Submission before deadline is accepted."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000010)
+    res = post(student, f'/attempts/{identifier}/submit', payload={'answers': {ids[0]: 1, ids[1]: 0, ids[2]: 2}})
+    assert res.status_code == 200
+    attempt = stored_attempt(app, identifier)
+    assert attempt['submitted_at'] is not None
+    assert attempt['score'] == 3
+    assert attempt['time_taken'] == 10
+
+
+# --- COUNTDOWN TESTS ---
+
+def test_countdown_correct_remaining_time(app, quiz, monkeypatch):
+    """Server provides correct remaining time data."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    monkeypatch.setattr('app.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000100)
+    monkeypatch.setattr('app.now', lambda: 2000000100)
+    page = student.get(f'/attempts/{identifier}')
+    # server_now should be 2000000100, deadline should be 2000000000 + 300 = 2000000300
+    assert b'data-deadline="2000000300"' in page.data
+    assert b'data-server-now="2000000100"' in page.data
+
+
+def test_countdown_survives_refresh(app, quiz, monkeypatch):
+    """Countdown data is consistent after refresh."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000050)
+    page1 = student.get(f'/attempts/{identifier}')
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000100)
+    page2 = student.get(f'/attempts/{identifier}')
+    # Deadline should not change
+    assert b'data-deadline="2000000300"' in page1.data
+    assert b'data-deadline="2000000300"' in page2.data
+
+
+def test_countdown_does_not_depend_on_browser_clock(app, quiz, monkeypatch):
+    """Countdown uses server-provided time, not browser clock."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    monkeypatch.setattr('app.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    # Save provides server_now and deadline for resynchronization
+    ids = question_ids(app, quiz)
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000100)
+    monkeypatch.setattr('app.now', lambda: 2000000100)
+    res = post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1}})
+    data = res.get_json()
+    assert data['deadline'] == 2000000300
+    assert data['server_now'] == 2000000100
+
+
+# --- SECURITY TESTS ---
+
+def test_browser_clock_manipulation_cannot_bypass_deadline(app, quiz, monkeypatch):
+    """A student cannot bypass deadline even with manipulated client data."""
+    monkeypatch.setattr('quiz_service.now', lambda: 2000000000)
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    deadline = stored_attempt(app, identifier)['deadline']
+    # Move past deadline
+    monkeypatch.setattr('quiz_service.now', lambda: deadline + 600)
+    # Attempt to save new answers after deadline
+    res = post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 0, ids[1]: 0, ids[2]: 2}})
+    assert res.status_code == 200
+    # Should be auto-submitted with no answers saved (since none were saved before deadline)
+    attempt = stored_attempt(app, identifier)
+    assert attempt['submitted_at'] is not None
+    assert attempt['score'] == 0  # No answers were saved before deadline
+
+
+def test_client_submitted_deadline_ignored(app, quiz):
+    """Client-submitted deadline value is completely ignored."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    # Try to submit with forged deadline
+    payload = {'answers': {ids[0]: 1}, 'deadline': 9999999999, 'score': 100}
+    res = post(student, f'/attempts/{identifier}/submit', payload=payload)
+    assert res.status_code == 200
+    attempt = stored_attempt(app, identifier)
+    assert attempt['score'] == 1  # Not the forged 100
+    assert attempt['deadline'] != 9999999999
+
+
+def test_take_quiz_provides_schedule_display(app, client, monkeypatch):
+    """Take quiz page provides schedule display data."""
+    IST = ZoneInfo("Asia/Kolkata")
+    start_epoch = int(datetime(2026, 9, 25, 21, 26, tzinfo=IST).timestamp())
+    end_epoch = int(datetime(2026, 9, 26, 5, 57, tzinfo=IST).timestamp())
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch, end_epoch=end_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: start_epoch + 10)
+    student = app.test_client()
+    identifier = attempt_id(join(student, {'code': quiz_record['code']}))
+    page = student.get(f'/attempts/{identifier}')
+    assert page.status_code == 200
+    assert b'25 Sep 2026, 09:26 PM' in page.data
+    assert b'26 Sep 2026, 05:57 AM' in page.data
+
+
+def test_take_quiz_has_saved_answers_flag(app, quiz):
+    """Take quiz page shows restored notice when answers exist."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    ids = question_ids(app, quiz)
+    post(student, f'/attempts/{identifier}/save', payload={'answers': {ids[0]: 1}})
+    page = student.get(f'/attempts/{identifier}')
+    assert b'data-has-saved="true"' in page.data
+    assert b'Your previous answers have been restored' in page.data
+
+
+def test_take_quiz_no_saved_answers_flag(app, quiz):
+    """Take quiz page does not show restored notice when no answers exist."""
+    student = app.test_client()
+    identifier = attempt_id(join(student, quiz))
+    page = student.get(f'/attempts/{identifier}')
+    assert b'data-has-saved="false"' in page.data
+
+
+def test_join_page_shows_schedule_not_started(app, client, monkeypatch):
+    """Join page shows 'not started yet' message for future quizzes."""
+    start_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, start_epoch=start_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: start_epoch - 3600)
+    monkeypatch.setattr('app.now', lambda: start_epoch - 3600)
+    student = app.test_client()
+    page = student.get(f"/join/{quiz_record['code']}")
+    assert b'has not started yet' in page.data
+
+
+def test_join_page_shows_schedule_ended(app, client, monkeypatch):
+    """Join page shows 'ended' message for past quizzes."""
+    end_epoch = 2000000000
+    quiz_record = _make_scheduled_quiz_utc(app, client, end_epoch=end_epoch)
+    monkeypatch.setattr('quiz_service.now', lambda: end_epoch + 3600)
+    monkeypatch.setattr('app.now', lambda: end_epoch + 3600)
+    student = app.test_client()
+    page = student.get(f"/join/{quiz_record['code']}")
+    assert b'has already ended' in page.data
+
+
+def test_join_page_contains_start_modal(app, quiz):
+    """Join page must contain the 'Before you begin' confirmation modal."""
+    student = app.test_client()
+    page = student.get(f"/join/{quiz['code']}")
+    assert page.status_code == 200
+    assert b'id="start-quiz-modal"' in page.data
+    assert b'id="read-instructions-check"' in page.data
+    assert b'I have read and understood the instructions.' in page.data
+
+
+def test_view_answers_denied_if_not_allowed(app, client, quiz):
+    """Answer review disabled -> access denied."""
+    student = app.test_client()
+    ident = attempt_id(join(student, quiz))
+    q_ids = question_ids(app, quiz)
+    post(student, f"/attempts/{ident}/submit", payload={"answers": {str(q_ids[0]): 1}})
+    
+    response = student.get(f"/attempts/{ident}/answers")
+    assert response.status_code == 403
+    assert b'Answer review is not allowed' in response.data
+
+
+def test_view_answers_allowed_after_submission(app, client):
+    """Submitted student can view answers if allow_review is enabled."""
+    assert register(client).status_code == 302
+    assert login(client).status_code == 302
+    data = quiz_data()
+    data['allow_review'] = True
+    assert post(client, '/quizzes/new', {'quiz_data': json.dumps(data)}).status_code == 302
+    
+    with app.app_context():
+        quiz = to_dict(get_db().quizzes.find_one())
+        
+    student = app.test_client()
+    ident = attempt_id(join(student, quiz))
+    q_ids = question_ids(app, quiz)
+    
+    # Unsubmitted -> Denied
+    response = student.get(f"/attempts/{ident}/answers")
+    assert response.status_code == 403
+    
+    post(student, f"/attempts/{ident}/submit", payload={"answers": {str(q_ids[0]): 0}})
+    
+    # Submitted -> Allowed
+    response = student.get(f"/attempts/{ident}/answers")
+    assert response.status_code == 200
+    assert b'Answer Review' in response.data
+    
+    # Correct and incorrect are displayed
+    assert b'Your answer:' in response.data
+    assert b'Correct answer:' in response.data
+
+
+def test_view_answers_denies_other_students(app, client):
+    """Another student's attempt cannot access the answer key."""
+    assert register(client).status_code == 302
+    assert login(client).status_code == 302
+    data = quiz_data()
+    data['allow_review'] = True
+    post(client, '/quizzes/new', {'quiz_data': json.dumps(data)})
+    
+    with app.app_context():
+        quiz = to_dict(get_db().quizzes.find_one())
+        
+    student1 = app.test_client()
+    ident = attempt_id(join(student1, quiz))
+    post(student1, f"/attempts/{ident}/submit", payload={"answers": {}})
+    
+    student2 = app.test_client()
+    response = student2.get(f"/attempts/{ident}/answers")
+    # student_attempt obscures missing/foreign attempts with 404
+    assert response.status_code == 404

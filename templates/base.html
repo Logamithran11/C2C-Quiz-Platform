@@ -18,8 +18,14 @@
   <nav aria-label="Main navigation">
     <a href="{{ url_for('join_quiz') }}">Join a quiz</a>
     {% if g.creator %}
-      <a href="{{ url_for('dashboard') }}">Dashboard</a>
-      <a href="{{ url_for('banks') }}">Question Banks</a>
+      {% if g.creator.role == 'admin' %}
+        <a href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+        <a href="{{ url_for('admin_results') }}">All Results</a>
+        <a href="{{ url_for('admin_manage') }}">Manage Admins</a>
+      {% else %}
+        <a href="{{ url_for('dashboard') }}">Dashboard</a>
+        <a href="{{ url_for('banks') }}">Question Banks</a>
+      {% endif %}
       <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button ghost small" type="submit">Log out</button></form>
     {% else %}
       <a href="{{ url_for('login') }}">Log in</a>

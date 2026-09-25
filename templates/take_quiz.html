@@ -3,8 +3,23 @@
 {% block scripts %}<script defer src="{{ url_for('static', filename='js/quiz_player.js') }}"></script>{% endblock %}
 {% block content %}
 <noscript><div class="alert">JavaScript is required for answer saving and submission. Your deadline continues running.</div></noscript>
-<div id="quiz-player" data-deadline="{{ attempt.deadline }}" data-server-now="{{ server_now }}" data-save-url="{{ url_for('save_answers', attempt_id=attempt.id) }}" data-submit-url="{{ url_for('submit_quiz', attempt_id=attempt.id) }}" data-result-url="{{ url_for('result', attempt_id=attempt.id) }}">
+<div id="quiz-player" data-deadline="{{ attempt.deadline }}" data-server-now="{{ server_now }}" data-save-url="{{ url_for('save_answers', attempt_id=attempt.id) }}" data-submit-url="{{ url_for('submit_quiz', attempt_id=attempt.id) }}" data-result-url="{{ url_for('result', attempt_id=attempt.id) }}" data-has-saved="{{ 'true' if has_saved_answers else 'false' }}" {% if schedule_display.get('start_ist') %}data-schedule-start="{{ schedule_display.start_ist }}"{% endif %} {% if schedule_display.get('end_ist') %}data-schedule-end="{{ schedule_display.end_ist }}"{% endif %}>
 <div class="page-heading"><div><span class="eyebrow">{{ quiz.code }} · {{ attempt.name }} · {{ attempt.roll_number }}</span><h1>{{ quiz.title }}</h1></div><div class="timer" role="timer" aria-label="Time remaining"><small>TIME REMAINING</small><strong id="countdown">--:--</strong></div></div>
+{% if schedule_display.get('start_ist') or schedule_display.get('end_ist') %}
+<div id="quiz-timing-panel" style="margin-bottom:16px;padding:12px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;"><span style="font-size:0.85rem;font-weight:600;color:var(--text);">⏱ Quiz Timing</span></div>
+<div style="display:flex;flex-wrap:wrap;gap:16px;font-size:0.85rem;color:var(--muted);">
+{% if schedule_display.get('start_ist') %}<div>Start: <strong style="color:var(--text);">{{ schedule_display.start_ist }} IST</strong></div>{% endif %}
+{% if schedule_display.get('end_ist') %}<div>End: <strong style="color:var(--text);">{{ schedule_display.end_ist }} IST</strong></div>{% endif %}
+<div>Time remaining: <strong id="timing-countdown" style="color:var(--text);">--:--:--</strong></div>
+</div>
+</div>
+{% endif %}
+{% if has_saved_answers %}
+<div id="restored-notice" style="margin-bottom:12px;padding:10px 16px;background:#e8f5e9;border-radius:8px;border:1px solid #a5d6a7;font-size:0.85rem;color:#2e7d32;">✓ Your previous answers have been restored.</div>
+{% endif %}
+<div id="connection-status" style="display:none;margin-bottom:12px;padding:10px 16px;border-radius:8px;font-size:0.85rem;" role="status"></div>
+<div id="deadline-warning" style="display:none;margin-bottom:12px;padding:10px 16px;background:#fff8e1;border-radius:8px;border:1px solid #ffe082;font-size:0.85rem;color:#f57f17;" role="alert"></div>
 <div class="player-layout"><aside class="card question-sidebar"><h2>Your progress</h2><p id="progress-text" aria-live="polite">0 of {{ questions|length }} answered</p><progress id="answer-progress" max="{{ questions|length }}" value="0"></progress><div class="question-nav" aria-label="Question navigation">{% for question in questions %}<button type="button" data-index="{{ loop.index0 }}" class="nav-question" aria-label="Go to question {{ loop.index }}">{{ loop.index }}</button>{% endfor %}</div><p class="muted">Filled buttons indicate answered questions.</p><p id="save-status" role="status">Your answers save as you go.</p></aside>
 <section class="card question-area"><form id="answer-form">{% for question in questions %}<fieldset class="question-panel" data-id="{{ question.id }}" {% if not loop.first %}hidden{% endif %}><legend><span class="eyebrow">QUESTION {{ loop.index }} OF {{ questions|length }}</span><span class="question-title">{{ question.text }}</span></legend><div class="answer-options">{% for index in question.get('option_order', [0, 1, 2, 3]) %}<label class="answer-option"><input type="radio" name="q_{{ question.id }}" value="{{ index }}" {% if saved.get(question.id|string) == index %}checked{% endif %}><span class="option-letter">{{ 'ABCD'[loop.index0] }}</span><span>{{ question['option_' ~ index] }}</span></label>{% endfor %}</div><button class="text-button clear-answer" type="button">Clear answer</button></fieldset>{% endfor %}<div class="spread question-controls"><button class="button secondary" type="button" id="previous-question">← Previous</button><button class="button secondary" type="button" id="next-question">Next →</button></div><hr><div class="spread"><p class="muted">Ready? Submit to see your result.</p><button class="button" type="submit" id="submit-quiz">Submit quiz</button></div></form><p class="error-text" id="player-error" role="alert"></p></section></div></div>
 
@@ -18,7 +33,7 @@
       <p style="margin-top:12px;">You cannot change your answers after submission.</p>
     </div>
     <div class="spread" style="margin-top:24px;">
-      <button type="button" class="button secondary" id="submit-cancel">Keep Reviewing</button>
+      <button type="button" class="button ghost" id="submit-cancel">Cancel</button>
       <button type="button" class="button" id="submit-confirm">Submit Quiz</button>
     </div>
   </div>
